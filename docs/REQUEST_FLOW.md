@@ -1321,58 +1321,247 @@ Relevant memories returned to AI context
 
 ## 10. 异常处理机制
 
-### 10.1 中间件级错误处理
+### 10.1 异常处理架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           用户请求                                       │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                 AbortHandlerMiddleware (创建 AbortController)            │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                 ErrorHandlerMiddleware (捕获异常)                        │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  try --> 正常处理流 --> 返回结果                                  │   │
+│  │                                                                   │   │
+│  │  catch -->                                                       │   │
+│  │      ├── handleError() (特定 Provider 错误映射)                   │   │
+│  │      ├── createErrorChunk() (转换为 ErrorChunk)                  │   │
+│  │      ├── onError 回调                                            │   │
+│  │      └── shouldThrow?                                            │   │
+│  │              |-- Yes --> 抛出错误                                 │   │
+│  │              |-- No --> 返回包含 ErrorChunk 的流                  │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     StreamProcessingService                              │
+│  • 解析 ErrorChunk                                                      │
+│  • 调用 callbacks.onError()                                             │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     baseCallbacks.onError()                              │
+│  • 更新 Block 状态 (ERROR/PAUSED)                                       │
+│  • 创建 ErrorBlock                                                      │
+│  • 发送通知                                                             │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     ErrorBlock UI 展示                                   │
+│  • 显示错误消息                                                          │
+│  • ErrorDetailModal (详情弹窗)                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 10.2 中间件级错误处理
 
 **文件**: `src/renderer/src/aiCore/legacy/middleware/common/ErrorHandlerMiddleware.ts`
 
 ```typescript
 export const ErrorHandlerMiddleware = () => (next) => async (ctx, params) => {
+  const { shouldThrow } = params
   try {
     return await next(ctx, params)
-  } catch (error) {
+  } catch (error: any) {
     // 1. 错误日志记录
     logger.error(error)
 
     // 2. 特定提供商错误处理
+    let processedError = error
     processedError = handleError(error, params)
 
-    // 3. 创建错误 Chunk
+    // 3. 将错误转换为标准 ErrorChunk
     const errorChunk = createErrorChunk(processedError)
 
-    // 4. 调用外部错误回调
+    // 4. 调用 onError 回调
     if (params.onError) {
       params.onError(processedError)
     }
 
-    // 5. 根据配置决定是否抛出
+    // 5. 根据 shouldThrow 决定是抛出错误还是作为流的一部分
     if (shouldThrow) {
       throw processedError
     }
 
-    // 6. 返回错误流
-    return { stream: errorStream, getText: () => '' }
+    // 6. 返回包含错误的流
+    const errorStream = new ReadableStream<Chunk>({
+      start(controller) {
+        controller.enqueue(errorChunk)
+        controller.close()
+      }
+    })
+    return { rawOutput: undefined, stream: errorStream, controller: undefined, getText: () => '' }
   }
 }
 ```
 
-### 10.2 错误 Chunk 结构
+### 10.3 特定提供商错误映射
+
+**智谱 AI 特定错误码**:
+
+| 错误码 | i18n Key | 说明 |
+|--------|----------|------|
+| 401 | `chat.no_api_key` | API Key 无效或令牌过期 |
+| 1304 | `chat.quota_exceeded` | 配额用尽 |
+| 1113 | `chat.insufficient_balance` | 余额不足 |
+
+### 10.4 错误类型系统
+
+**文件**: `src/renderer/src/types/error.ts`
+
+支持的 AI SDK 错误类型:
+- `SerializedAiSdkAPICallError` - API 调用错误
+- `SerializedAiSdkDownloadError` - 下载错误
+- `SerializedAiSdkRetryError` - 重试错误
+- `SerializedAiSdkNoSuchModelError` - 模型不存在错误
+- `SerializedAiSdkNoSuchToolError` - 工具不存在错误
+- `ProviderSpecificError` - 提供商特定错误
+
+### 10.5 错误 Chunk 结构
+
+**文件**: `src/renderer/src/types/chunk.ts`
 
 ```typescript
 interface ErrorChunk {
   error: ResponseError
   type: ChunkType.ERROR
 }
+
+interface ResponseError {
+  message: string
+  status?: number
+  statusText?: string
+  url?: string
+  responseBody?: string
+  // ... 更多字段
+}
 ```
 
-### 10.3 特定提供商错误处理
+### 10.6 错误序列化与格式化
 
-支持特定错误的 i18n 国际化处理:
-- **智谱 (Zhipu)**: API Key 无效、配额超出、余额不足等
-- **通用**: 401 未授权等
+**文件**: `src/renderer/src/utils/error.ts`
 
-### 10.4 API Server 错误处理
+```typescript
+// 将 AI SDK 错误序列化为可传输格式
+export function serializeError(error: unknown): SerializedError
 
-**文件**: `src/main/apiServer/middleware/error.ts`
+// 格式化错误消息供用户查看
+export function formatErrorMessage(error: unknown): string
+
+// 判断是否为中断错误
+export function isAbortError(error: unknown): boolean
+
+// 格式化 AI SDK 错误详情
+export function formatAiSdkError(error: AISDKError): string
+```
+
+### 10.7 AbortController 管理
+
+**文件**: `src/renderer/src/utils/abortController.ts`
+
+```typescript
+// 全局中断控制器映射
+export const abortMap = new Map<string, (() => void)[]>()
+
+// 添加中断控制器
+export const addAbortController = (id: string, abortFn: () => void) => {
+  abortMap.set(id, [...(abortMap.get(id) || []), abortFn])
+}
+
+// 中止指定 ID 的所有请求
+export const abortCompletion = (id: string) => {
+  const abortFns = abortMap.get(id)
+  if (abortFns?.length) {
+    for (const fn of [...abortFns]) {
+      fn()
+      removeAbortController(id, fn)
+    }
+  }
+}
+```
+
+### 10.8 流式响应中断处理
+
+**文件**: `src/renderer/src/services/messageStreaming/callbacks/baseCallbacks.ts`
+
+```typescript
+onError: async (error: AISDKError) => {
+  // 忽略无输出错误
+  if (NoOutputGeneratedError.isInstance(error)) return
+
+  const isErrorTypeAbort = isAbortError(error)
+  const serializableError = serializeError(error)
+
+  // 中断错误使用特殊占位消息
+  if (isErrorTypeAbort) {
+    serializableError.message = 'pause_placeholder'
+  }
+
+  // 更新 block 状态为 ERROR/PAUSED
+  const changes: Partial<ThinkingMessageBlock> = {
+    status: isErrorTypeAbort ? MessageBlockStatus.PAUSED : MessageBlockStatus.ERROR
+  }
+
+  // 创建错误 block
+  const errorBlock = createErrorBlock(assistantMsgId, serializableError, { status: MessageBlockStatus.SUCCESS })
+  await blockManager.handleBlockTransition(errorBlock, MessageBlockType.ERROR)
+}
+```
+
+### 10.9 用户界面错误展示
+
+#### ErrorBlock 组件
+
+**文件**: `src/renderer/src/pages/home/Messages/Blocks/ErrorBlock.tsx`
+
+- 显示错误消息和 HTTP 状态码
+- 支持国际化错误消息
+- 提供"详情"按钮查看完整错误
+- 可关闭删除错误块
+
+#### ErrorDetailModal 组件
+
+**文件**: `src/renderer/src/components/ErrorDetailModal/index.tsx`
+
+- 详细展示所有错误字段
+- 支持复制错误详情
+- 大数据自动截断处理
+
+#### 错误边界组件
+
+| 组件 | 文件 | 用途 |
+|------|------|------|
+| ErrorBoundary | `components/ErrorBoundary.tsx` | 全局错误边界 |
+| MessageErrorBoundary | `pages/home/Messages/MessageErrorBoundary.tsx` | 消息渲染错误 |
+| BlockErrorFallback | `pages/home/Messages/Blocks/BlockErrorFallback.tsx` | Block 错误回退 |
+
+### 10.10 超时配置
+
+| 场景 | 超时时间 |
+|------|----------|
+| 默认请求 | 30 秒 |
+| Flex 服务层级 | 15 分钟 |
+| 网络请求 (fetch) | 30 秒 |
+| MCP 工具调用 | 默认 60 秒 (可配置) |
 
 ---
 
@@ -1422,53 +1611,311 @@ const persistedReducer = persistReducer({
 
 ## 12. 界面展示流程
 
-### 12.1 消息流回调
+### 12.1 数据存储层 (Redux Store)
 
-**文件**: `src/renderer/src/services/messageStreaming/callbacks/index.ts`
+#### 消息状态
 
-回调函数处理不同类型的 Chunk:
+**文件**: `src/renderer/src/store/newMessage.ts`
 
 ```typescript
-export const createCallbacks = (params: CallbackParams): StreamProcessorCallbacks => ({
-  onLLMResponseCreated: () => { /* 创建助手消息 */ },
-  onTextStart: () => { /* 开始显示文本 */ },
-  onTextChunk: (text) => { /* 追加文本 */ },
-  onThinkingStart: () => { /* 开始显示思考 */ },
-  onThinkingChunk: (text) => { /* 追加思考内容 */ },
-  onToolCallPending: (toolResponse) => { /* 显示工具等待确认 */ },
-  onToolCallInProgress: (toolResponse) => { /* 显示工具执行中 */ },
-  onToolCallComplete: (toolResponse) => { /* 显示工具结果 */ },
-  onExternalToolComplete: (result) => { /* 显示外部工具结果 */ },
-  onError: (error) => { /* 显示错误 */ },
-  onComplete: (status) => { /* 完成处理 */ },
-})
+interface MessagesState extends EntityState<Message, string> {
+  messageIdsByTopic: Record<string, string[]>  // topicId -> ordered message IDs
+  currentTopicId: string | null
+  loadingByTopic: Record<string, boolean>
+  fulfilledByTopic: Record<string, boolean>
+  displayCount: number
+}
 ```
 
-### 12.2 UI 组件层级
+#### 消息块状态
 
-```
-ChatInterface
-├── MessageList
-│   ├── UserMessage
-│   └── AssistantMessage
-│       ├── TextBlock
-│       ├── ThinkingBlock
-│       ├── ToolCallBlock
-│       └── ImageBlock
-├── InputArea
-│   └── MessageInput
-└── ToolCallConfirmation (Dialog)
+**文件**: `src/renderer/src/store/messageBlock.ts`
+
+```typescript
+// 规范化实体存储
+EntityState<MessageBlock>
+
+// Block 类型
+enum MessageBlockType {
+  UNKNOWN = 'unknown',      // 加载中占位符
+  MAIN_TEXT = 'main_text',  // 主要文本内容
+  THINKING = 'thinking',    // 推理过程 (Claude 等)
+  TRANSLATION = 'translation',
+  IMAGE = 'image',
+  CODE = 'code',
+  TOOL = 'tool',            // MCP 工具调用
+  FILE = 'file',
+  ERROR = 'error',
+  CITATION = 'citation',    // Web 搜索, 知识库引用
+  VIDEO = 'video',
+  COMPACT = 'compact'
+}
+
+// Block 状态
+enum MessageBlockStatus {
+  PENDING = 'pending',
+  PROCESSING = 'processing',
+  STREAMING = 'streaming',
+  SUCCESS = 'success',
+  ERROR = 'error',
+  PAUSED = 'paused'
+}
 ```
 
-### 12.3 消息块管理
+### 12.2 流式数据流
+
+#### 流处理器
+
+**文件**: `src/renderer/src/services/StreamProcessingService.ts`
+
+```typescript
+interface StreamProcessorCallbacks {
+  onLLMResponseCreated?: () => void
+  onTextStart?: () => void
+  onTextChunk?: (text: string) => void
+  onTextComplete?: (text: string) => void
+  onThinkingStart?: () => void
+  onThinkingChunk?: (text: string, thinking_millsec?: number) => void
+  onThinkingComplete?: (text: string, thinking_millsec?: number) => void
+  onToolCallPending?: (toolResponse: MCPToolResponse) => void
+  onToolCallComplete?: (toolResponse: MCPToolResponse) => void
+  onImageGenerated?: (imageData: GenerateImageResponse) => void
+  onError?: (error: any) => void
+  onComplete?: (status: AssistantMessageStatus, response?: Response) => void
+  // ... 更多回调
+}
+```
+
+#### Block 管理器
 
 **文件**: `src/renderer/src/services/messageStreaming/BlockManager.ts`
 
-负责:
-- 创建消息块
-- 更新消息块内容
-- 管理块状态
-- 处理块完成
+```typescript
+class BlockManager {
+  // 智能更新策略 - 流式期间节流，完成时立即更新
+  smartBlockUpdate(blockId, changes, blockType, isComplete) {
+    if (isBlockTypeChanged || isComplete) {
+      // 立即更新 + DB 保存
+      dispatch(updateOneBlock({ id: blockId, changes }))
+    } else {
+      // 节流更新以实现平滑流式效果
+      throttledBlockUpdate(blockId, changes)
+    }
+  }
+
+  // 处理新块创建
+  async handleBlockTransition(newBlock, newBlockType) {
+    dispatch(newMessagesActions.updateMessage({ blockInstruction: { id: newBlock.id } }))
+    dispatch(upsertOneBlock(newBlock))
+    dispatch(newMessagesActions.upsertBlockReference({ messageId, blockId }))
+  }
+}
+```
+
+### 12.3 组件层级结构
+
+```
+Chat.tsx (/pages/home/Chat.tsx)
+├── ChatNavbar
+├── Messages (/pages/home/Messages/Messages.tsx)
+│   ├── InfiniteScroll (分页加载)
+│   │   └── MessageGroup (/pages/home/Messages/MessageGroup.tsx)
+│   │       └── MessageItem (/pages/home/Messages/Message.tsx)
+│   │           ├── MessageHeader
+│   │           ├── MessageContent (/pages/home/Messages/MessageContent.tsx)
+│   │           │   └── MessageBlockRenderer (/pages/home/Messages/Blocks/index.tsx)
+│   │           │       ├── MainTextBlock -> Markdown
+│   │           │       ├── ThinkingBlock
+│   │           │       ├── ToolBlock / ToolBlockGroup
+│   │           │       ├── ImageBlock
+│   │           │       ├── ErrorBlock
+│   │           │       ├── CitationBlock
+│   │           │       └── PlaceholderBlock
+│   │           └── MessageMenubar
+│   └── MessageAnchorLine (消息导航)
+└── Inputbar
+```
+
+### 12.4 消息块渲染器
+
+**文件**: `src/renderer/src/pages/home/Messages/Blocks/index.tsx`
+
+```typescript
+const MessageBlockRenderer: React.FC<Props> = ({ blocks, message }) => {
+  const blockEntities = useSelector(selectMessageEntities)
+  const renderedBlocks = blocks.map(blockId => blockEntities[blockId]).filter(Boolean)
+
+  // 分组相似块 (图片, 视频, 工具)
+  const groupedBlocks = groupSimilarBlocks(renderedBlocks)
+
+  return (
+    <AnimatePresence mode="sync">
+      {groupedBlocks.map(block => {
+        switch (block.type) {
+          case MessageBlockType.MAIN_TEXT:
+            return <MainTextBlock block={block} citationBlockId={...} />
+          case MessageBlockType.THINKING:
+            return <ThinkingBlock block={block} />
+          case MessageBlockType.TOOL:
+            return <ToolBlock block={block} />
+          case MessageBlockType.ERROR:
+            return <ErrorBlock block={block} message={message} />
+          // ... 其他类型
+        }
+      })}
+      {/* 处理中显示占位符 */}
+      {isProcessing && <PlaceholderBlock />}
+    </AnimatePresence>
+  )
+}
+```
+
+### 12.5 Markdown 渲染
+
+**文件**: `src/renderer/src/pages/home/Markdown/Markdown.tsx`
+
+```typescript
+const Markdown: FC<Props> = ({ block, postProcess }) => {
+  // 使用 useSmoothStream hook 实现平滑流式效果
+  const { addChunk, reset } = useSmoothStream({
+    onUpdate: (rawText) => setDisplayedContent(postProcess(rawText)),
+    streamDone: isStreamDone,
+    initialText: block.content
+  })
+
+  // ReactMarkdown 配置
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkMath, remarkAlert]}
+      rehypePlugins={[rehypeKatex, rehypeRaw]}
+      components={{
+        code: (props) => <CodeBlock {...props} blockId={block.id} />,
+        table: (props) => <Table {...props} />,
+        // ... 其他组件
+      }}>
+      {messageContent}
+    </ReactMarkdown>
+  )
+}
+```
+
+### 12.6 代码块渲染
+
+**文件**: `src/renderer/src/pages/home/Markdown/CodeBlock.tsx`
+
+```typescript
+const CodeBlock: React.FC<Props> = ({ children, className, blockId }) => {
+  const language = /language-([\w-+]+)/.exec(className)?.[1]
+  const msgBlock = messageBlocksSelectors.selectById(store.getState(), blockId)
+  const isStreaming = msgBlock?.status === MessageBlockStatus.STREAMING
+
+  // HTML artifacts 特殊渲染
+  if (codeFancyBlock && language === 'html') {
+    return <HtmlArtifactsCard html={children} isStreaming={isStreaming} />
+  }
+
+  return <CodeBlockView language={language}>{children}</CodeBlockView>
+}
+```
+
+### 12.7 消息状态展示
+
+#### 思考块 (ThinkingBlock)
+
+**文件**: `src/renderer/src/pages/home/Messages/Blocks/ThinkingBlock.tsx`
+
+```typescript
+const ThinkingBlock: React.FC<Props> = ({ block }) => {
+  const isThinking = block.status === MessageBlockStatus.STREAMING
+
+  // 完成时自动折叠
+  useEffect(() => {
+    setActiveKey(thoughtAutoCollapse ? '' : 'thought')
+  }, [isThinking])
+
+  return (
+    <Collapse
+      label={<ThinkingEffect isThinking={isThinking} thinkingTimeText={...} />}
+      // 可折叠的思考内容
+    />
+  )
+}
+```
+
+#### 占位块 (PlaceholderBlock)
+
+**文件**: `src/renderer/src/pages/home/Messages/Blocks/PlaceholderBlock.tsx`
+
+```typescript
+const PlaceholderBlock: React.FC<Props> = ({ block }) => {
+  if (block.status === MessageBlockStatus.PROCESSING && block.type === MessageBlockType.UNKNOWN) {
+    return (
+      <MessageContentLoading>
+        <BeatLoader color="var(--color-text-1)" size={8} />
+      </MessageContentLoading>
+    )
+  }
+  return null
+}
+```
+
+### 12.8 完整数据流
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        AI Provider Response                          │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │ Stream chunks
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                 AiSdkToChunkAdapter                                  │
+│   将 AI SDK 流转换为统一 Chunk 格式                                   │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │ Chunk[]
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                 createStreamProcessor()                              │
+│   将 Chunk 分发到对应回调                                             │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │ Callbacks
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                 BlockManager                                         │
+│   管理块生命周期和节流更新                                             │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │ Redux Actions
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                 Redux Store                                          │
+│   newMessages.slice: Message entities                                │
+│   messageBlocks.slice: MessageBlock entities                         │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │ useSelector
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                 React Components                                     │
+│   Messages -> MessageGroup -> MessageItem -> MessageContent          │
+│                            -> MessageBlockRenderer -> Block          │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 12.9 性能优化
+
+| 优化策略 | 实现方式 |
+|----------|----------|
+| 节流更新 | Block 内容更新节流 (150ms) |
+| RAF 调度 | 使用 `requestAnimationFrame` 进行 Redux 更新 |
+| 规范化状态 | Messages 和 Blocks 分开存储，通过 ID 关联 |
+| 记忆化选择器 | `selectMessagesForTopic`, `selectFormattedCitationsByBlockId` |
+| 动画优化 | 使用 `framer-motion` (`motion/react`) 实现平滑动画 |
+
+### 12.10 流式更新策略
+
+| 阶段 | 行为 |
+|------|------|
+| 流式期间 | 节流更新到 Redux 和 DB |
+| 完成时 | 立即更新，取消节流，刷入 DB |
+| Block 类型变化 | 取消前一个块的节流，立即更新 |
 
 ---
 
@@ -1481,63 +1928,135 @@ ChatInterface
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                      messageThunk (Redux Thunk)                         │
-│  • 创建用户消息                                                          │
-│  • 创建空助手消息                                                        │
-│  • 获取助手配置                                                          │
+│                      sendMessage (Redux Thunk)                          │
+│  • 保存用户消息到数据库                                                  │
+│  • 添加用户消息到 Redux Store                                            │
+│  • 创建助手消息占位符                                                    │
+│  • 加入话题队列执行                                                      │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         AiProvider.completions()                        │
-│  • 选择 API 客户端                                                       │
-│  • 构建中间件链                                                          │
-│  • 参数准备                                                              │
+│               fetchAndProcessAssistantResponseImpl                      │
+│  • 创建 BlockManager                                                    │
+│  • 创建流处理器回调                                                      │
+│  • 设置 AbortController                                                 │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    transformMessagesAndFetch                             │
+│  • 准备模型消息格式                                                      │
+│  • 注入知识库搜索提示 (如果启用)                                         │
+│  • 注入记忆上下文 (如果启用)                                             │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    fetchChatCompletion                                   │
+│  • 获取 Provider 并应用 API Key 轮换                                     │
+│  • 获取 MCP 工具列表                                                    │
+│  • 构建流式参数                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         ModernAiProvider.completions()                  │
+│  • 创建 AI SDK Provider 实例                                            │
+│  • 创建模型实例                                                         │
+│  • 构建插件                                                             │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         中间件链处理 (责任链)                             │
+│  1. FinalChunkConsumerMiddleware - 最终块消费                           │
+│  2. ErrorHandlerMiddleware - 错误处理                                   │
+│  3. TransformCoreToSdkParamsMiddleware - 参数转换                       │
+│  4. AbortHandlerMiddleware - 中断处理                                   │
+│  5. McpToolChunkMiddleware - MCP 工具处理                               │
+│  6. TextChunkMiddleware - 文本处理                                      │
+│  7. WebSearchMiddleware - 网页搜索                                      │
+│  8. ToolUseExtractionMiddleware - 工具使用提取                          │
+│  9. ThinkingTagExtractionMiddleware - 思考标签提取                      │
+│  10. ThinkChunkMiddleware - 思考块处理                                  │
+│  11. ResponseTransformMiddleware - 响应转换                             │
+│  12. StreamAdapterMiddleware - 流适配器                                 │
+│  13. RawStreamListenerMiddleware - 原始流监听器                         │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         API 客户端 (流式响应)                             │
-│  • OpenAI / Anthropic / Gemini / 等                                      │
+│  • OpenAI / Anthropic / Gemini / Azure / AWS Bedrock / 等               │
+│  • 返回 AsyncIterable 或 ReadableStream                                 │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                        中间件链处理 (责任链)                              │
-│  1. ErrorHandlerMiddleware - 错误处理                                    │
-│  2. ToolUseExtractionMiddleware - 提取工具调用                           │
-│  3. McpToolChunkMiddleware - MCP 工具处理                                │
-│  4. WebSearchMiddleware - 网页搜索                                       │
-│  5. ThinkingTagExtractionMiddleware - 思考提取                          │
-│  6. TextChunkMiddleware - 文本处理                                       │
+│                      AiSdkToChunkAdapter                                 │
+│  • 将 AI SDK 流事件转换为 Chunk                                          │
+│  • 处理 tool-input-start/delta/end                                      │
+│  • 处理 text-delta, reasoning 等                                        │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                      StreamProcessor (Chunk 处理)                        │
-│  • 解析 Chunk 类型                                                       │
+│  • 解析 Chunk 类型                                                      │
 │  • 分发到对应回调                                                       │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
-                    ┌───────────────┼───────────────┐
-                    ▼               ▼               ▼
-            ┌───────────┐   ┌───────────┐   ┌───────────┐
-            │ TextChunk │   │ThinkingChk│   │ToolCallChk│
-            └───────────┘   └───────────┘   └───────────┘
-                    │               │               │
-                    ▼               ▼               ▼
+                    ┌───────────────┼───────────────┬───────────────┐
+                    ▼               ▼               ▼               ▼
+            ┌───────────┐   ┌───────────┐   ┌───────────┐   ┌───────────┐
+            │ TEXT_DELTA │   │THINKING_DL│   │TOOL_PENDING│   │   ERROR   │
+            └───────────┘   └───────────┘   └───────────┘   └───────────┘
+                    │               │               │               │
+                    ▼               ▼               ▼               ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         BlockManager                                    │
-│  • 创建消息块                                                            │
-│  • 更新块内容                                                            │
-│  • 管理块状态                                                            │
+│  • 创建消息块 (MAIN_TEXT, THINKING, TOOL, ERROR 等)                     │
+│  • 智能更新块内容 (节流/立即)                                            │
+│  • 管理块状态 (PENDING → STREAMING → SUCCESS/ERROR)                     │
+│  • 更新 Redux Store 和数据库                                            │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Redux Store 更新                                 │
+│  • newMessagesActions.upsertOneBlock()                                  │
+│  • newMessagesActions.updateMessage()                                   │
+│  • 触发 React 重新渲染                                                  │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         React UI 更新                                    │
-│  • MessageList 重新渲染                                                 │
-│  • 显示文本/思考/工具结果                                                │
+│  Messages → MessageGroup → MessageItem → MessageContent                 │
+│          → MessageBlockRenderer → Block Component                       │
+│  • MainTextBlock (Markdown 渲染)                                        │
+│  • ThinkingBlock (可折叠思考)                                           │
+│  • ToolBlock (工具调用结果)                                             │
+│  • ErrorBlock (错误展示)                                                │
+│  • CitationBlock (引用来源)                                             │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      工具调用? (如果有)                                   │
+│  • 检查权限 (自动批准/用户确认)                                          │
+│  • 执行工具 (IPC → Main Process → MCP Server)                           │
+│  • 返回结果                                                             │
+│  • 递归调用 AI (最大深度 20)                                            │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      对话结束?                                           │
+│  • 存储记忆 (如果启用全局记忆)                                           │
+│  • 提取个人事实                                                         │
+│  • 更新记忆数据库                                                       │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1546,37 +2065,118 @@ ChatInterface
 ## 关键文件索引
 
 ### 请求发起
-- `src/renderer/src/store/thunk/messageThunk.ts` - Redux Thunk
+
+| 文件 | 说明 |
+|------|------|
+| `src/renderer/src/store/thunk/messageThunk.ts` | 消息发送 Redux Thunk |
+| `src/renderer/src/services/ApiService.ts` | API 调用服务 |
+| `src/renderer/src/services/ConversationService.ts` | 对话消息准备 |
 
 ### AI 核心
-- `src/renderer/src/aiCore/legacy/index.ts` - AiProvider 主入口
-- `src/renderer/src/aiCore/legacy/clients/` - API 客户端
-- `src/renderer/src/aiCore/prepareParams/` - 参数准备
+
+| 文件 | 说明 |
+|------|------|
+| `src/renderer/src/aiCore/legacy/index.ts` | Legacy AiProvider 主入口 |
+| `src/renderer/src/aiCore/index_new.ts` | Modern AiProvider (aisdk v6) |
+| `src/renderer/src/aiCore/legacy/clients/ApiClientFactory.ts` | API 客户端工厂 |
+| `src/renderer/src/aiCore/prepareParams/parameterBuilder.ts` | 参数构建器 |
 
 ### 中间件
-- `src/renderer/src/aiCore/legacy/middleware/builder.ts` - 中间件构建器
-- `src/renderer/src/aiCore/legacy/middleware/common/` - 通用中间件
-- `src/renderer/src/aiCore/legacy/middleware/core/` - 核心中间件
-- `src/renderer/src/aiCore/legacy/middleware/feat/` - 功能中间件
+
+| 文件 | 说明 |
+|------|------|
+| `src/renderer/src/aiCore/legacy/middleware/register.ts` | 中间件注册表 |
+| `src/renderer/src/aiCore/legacy/middleware/builder.ts` | 中间件构建器 |
+| `src/renderer/src/aiCore/legacy/middleware/composer.ts` | 中间件组合器 |
+| `src/renderer/src/aiCore/legacy/middleware/common/ErrorHandlerMiddleware.ts` | 错误处理 |
+| `src/renderer/src/aiCore/legacy/middleware/common/AbortHandlerMiddleware.ts` | 中断处理 |
+| `src/renderer/src/aiCore/legacy/middleware/core/McpToolChunkMiddleware.ts` | MCP 工具处理 |
+| `src/renderer/src/aiCore/legacy/middleware/feat/ToolUseExtractionMiddleware.ts` | 工具调用提取 |
+| `src/renderer/src/aiCore/legacy/middleware/feat/ThinkingTagExtractionMiddleware.ts` | 思考标签提取 |
 
 ### 流处理
-- `src/renderer/src/services/StreamProcessingService.ts` - 流处理器
-- `src/renderer/src/types/chunk.ts` - Chunk 类型定义
-- `src/renderer/src/services/messageStreaming/callbacks/` - 回调处理
+
+| 文件 | 说明 |
+|------|------|
+| `src/renderer/src/services/StreamProcessingService.ts` | 流处理器 |
+| `src/renderer/src/aiCore/chunk/AiSdkToChunkAdapter.ts` | AI SDK 到 Chunk 适配器 |
+| `src/renderer/src/types/chunk.ts` | Chunk 类型定义 |
+| `src/renderer/src/services/messageStreaming/BlockManager.ts` | Block 管理器 |
+| `src/renderer/src/services/messageStreaming/callbacks/` | 流回调处理 |
 
 ### 工具调用
-- `src/main/services/MCPService.ts` - MCP 服务
-- `src/renderer/src/utils/mcp-tools.ts` - 工具调用函数
-- `src/renderer/src/aiCore/legacy/middleware/core/McpToolChunkMiddleware.ts` - MCP 中间件
+
+| 文件 | 说明 |
+|------|------|
+| `src/main/services/MCPService.ts` | MCP 服务 (主进程) |
+| `src/renderer/src/utils/mcp-tools.ts` | 工具调用工具函数 |
+| `src/renderer/src/store/toolPermissions.ts` | 工具权限状态 |
+| `src/renderer/src/types/tool.ts` | 工具类型定义 |
 
 ### 知识库
-- `src/main/services/KnowledgeService.ts` - 知识库服务
-- `src/renderer/src/aiCore/tools/KnowledgeSearchTool.ts` - 知识库搜索工具
+
+| 文件 | 说明 |
+|------|------|
+| `src/main/services/KnowledgeService.ts` | 知识库服务 (主进程) |
+| `src/renderer/src/services/KnowledgeService.ts` | 知识库服务 (渲染进程) |
+| `src/renderer/src/aiCore/tools/KnowledgeSearchTool.ts` | 知识库搜索工具 |
+| `src/renderer/src/store/knowledge.ts` | 知识库状态管理 |
+| `src/renderer/src/queue/KnowledgeQueue.ts` | 知识库处理队列 |
+| `src/main/knowledge/embedjs/embeddings/EmbeddingsFactory.ts` | 嵌入模型工厂 |
+| `src/main/knowledge/reranker/Reranker.ts` | 重排序器 |
 
 ### 记忆
-- `src/main/services/memory/MemoryService.ts` - 记忆服务
-- `src/renderer/src/aiCore/tools/MemorySearchTool.ts` - 记忆搜索工具
-- `src/renderer/src/store/memory.ts` - 记忆状态管理
+
+| 文件 | 说明 |
+|------|------|
+| `src/main/services/memory/MemoryService.ts` | 记忆服务 (主进程) |
+| `src/renderer/src/services/MemoryService.ts` | 记忆服务 (渲染进程) |
+| `src/renderer/src/services/MemoryProcessor.ts` | 记忆处理器 |
+| `src/renderer/src/aiCore/tools/MemorySearchTool.ts` | 记忆搜索工具 |
+| `src/renderer/src/store/memory.ts` | 记忆状态管理 |
+| `src/renderer/src/utils/memory-prompts.ts` | 记忆 LLM 提示词 |
 
 ### 错误处理
-- `src/renderer/src/aiCore/legacy/middleware/common/ErrorHandlerMiddleware.ts` - 错误处理中间件
+
+| 文件 | 说明 |
+|------|------|
+| `src/renderer/src/aiCore/legacy/middleware/common/ErrorHandlerMiddleware.ts` | 错误处理中间件 |
+| `src/renderer/src/utils/error.ts` | 错误工具函数 |
+| `src/renderer/src/types/error.ts` | 错误类型定义 |
+| `src/renderer/src/utils/abortController.ts` | AbortController 管理 |
+| `src/renderer/src/pages/home/Messages/Blocks/ErrorBlock.tsx` | 错误块 UI 组件 |
+| `src/renderer/src/components/ErrorDetailModal/index.tsx` | 错误详情弹窗 |
+
+### 状态管理
+
+| 文件 | 说明 |
+|------|------|
+| `src/renderer/src/store/index.ts` | Redux Store 配置 |
+| `src/renderer/src/store/newMessage.ts` | 消息状态 |
+| `src/renderer/src/store/messageBlock.ts` | 消息块状态 |
+| `src/renderer/src/store/assistants.ts` | 助手配置 |
+| `src/renderer/src/store/llm.ts` | LLM/Provider 配置 |
+| `src/renderer/src/store/settings.ts` | 应用设置 |
+
+### UI 组件
+
+| 文件 | 说明 |
+|------|------|
+| `src/renderer/src/pages/home/Chat.tsx` | 聊天主页面 |
+| `src/renderer/src/pages/home/Messages/Messages.tsx` | 消息列表 |
+| `src/renderer/src/pages/home/Messages/Message.tsx` | 消息项 |
+| `src/renderer/src/pages/home/Messages/MessageContent.tsx` | 消息内容 |
+| `src/renderer/src/pages/home/Messages/Blocks/index.tsx` | 消息块渲染器 |
+| `src/renderer/src/pages/home/Messages/Blocks/MainTextBlock.tsx` | 文本块 |
+| `src/renderer/src/pages/home/Messages/Blocks/ThinkingBlock.tsx` | 思考块 |
+| `src/renderer/src/pages/home/Messages/Blocks/ToolBlock.tsx` | 工具块 |
+| `src/renderer/src/pages/home/Markdown/Markdown.tsx` | Markdown 渲染 |
+| `src/renderer/src/pages/home/Markdown/CodeBlock.tsx` | 代码块渲染 |
+
+### IPC 通信
+
+| 文件 | 说明 |
+|------|------|
+| `packages/shared/IpcChannel.ts` | IPC 通道定义 |
+| `src/preload/index.ts` | Preload 脚本 |
+| `src/main/ipc.ts` | 主进程 IPC 处理器 |
