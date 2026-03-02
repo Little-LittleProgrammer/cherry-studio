@@ -88,6 +88,9 @@ type AgentSessionContext = {
 const agentSessionRenameLocks = new Set<string>()
 const dbFacade = DbService.getInstance()
 
+/**
+ * 会从消息历史中倒序查找最近一条同 assistant 的消息的 agentSessionId（见 messageThunk.ts:109-124）。这是为了确保新消息能正确关联到已有的 Agent 会话链
+ */
 const findExistingAgentSessionContext = (
   state: RootState,
   topicId: string,
@@ -575,7 +578,7 @@ const fetchAndProcessAgentResponseImpl = async (
 
     const streamProcessorCallbacks = createStreamProcessor(callbacks)
 
-    // Emit initial chunk to mirror assistant behaviour and ensure pending UI state
+    // 发送初始分块以模拟助手行为并确保待处理的用户界面状态
     streamProcessorCallbacks({ type: ChunkType.LLM_RESPONSE_CREATED })
 
     const state = getState()
@@ -863,10 +866,25 @@ const fetchAndProcessAssistantResponseImpl = async (
 
 /**
  * 发送消息并处理助手回复
+ *
+ * ## 三种响应分支
+ * 1. **Agent 会话模式** (`activeAgentSession` 存在)
+ *    - 调用 `fetchAndProcessAgentResponseImpl`
+ *    - 需要维护 Agent Session 上下文，确保对话连续性
+ *
+ * 2. **多模型并行响应模式** (`mentionedModels.length > 0`)
+ *    - 调用 `dispatchMultiModelResponses`
+ *    - 用户通过 @ 提及多个模型，并行请求多个模型响应
+ *
+ * 3. **普通助手对话** (默认)
+ *    - 调用 `fetchAndProcessAssistantResponseImpl`
+ *    - 标准的单模型对话流程
+ *
  * @param userMessage 已创建的用户消息
  * @param userMessageBlocks 用户消息关联的消息块
  * @param assistant 助手对象
  * @param topicId 主题ID
+ * @param agentSession 可选的 Agent 会话上下文，用于 Agent 会话模式
  */
 export const sendMessage =
   (
@@ -878,23 +896,37 @@ export const sendMessage =
   ) =>
   async (dispatch: AppDispatch, getState: () => RootState) => {
     try {
+      // 空消息块检查，避免发送无效消息
       if (userMessage.blocks.length === 0) {
         logger.warn('sendMessage: No blocks in the provided message.')
         return
       }
 
+      // ==================== Agent Session 处理 ====================
+      // 为什么需要双重查找？
+      // 1. agentSession 参数可能来自外部调用（如用户点击触发），可能不是最新状态
+      // 2. 需要从 Redux store 中重新查找最新的 agentSessionId，确保消息能正确关联到已有的 Agent 会话链
+      // 3. findExistingAgentSessionContext 会从消息历史中倒序查找最近一条同 assistant 的消息的 agentSessionId
       const stateBeforeSend = getState()
       let activeAgentSession = agentSession ?? findExistingAgentSessionContext(stateBeforeSend, topicId, assistant.id)
+
+      // 如果存在 Agent Session，需要同步最新的 agentSessionId
+      // 场景：外部传入的 agentSession 可能有 sessionId 但缺少 agentSessionId，或者 agentSessionId 已过期
       if (activeAgentSession) {
         const derivedSession = findExistingAgentSessionContext(stateBeforeSend, topicId, assistant.id)
         if (derivedSession?.agentSessionId && derivedSession.agentSessionId !== activeAgentSession.agentSessionId) {
+          // 使用 store 中最新的 agentSessionId 覆盖，确保会话链的连续性
           activeAgentSession = { ...activeAgentSession, agentSessionId: derivedSession.agentSessionId }
         }
       }
+
+      // 将 agentSessionId 关联到用户消息，用于后续消息链追踪
       if (activeAgentSession?.agentSessionId && !userMessage.agentSessionId) {
         userMessage.agentSessionId = activeAgentSession.agentSessionId
       }
 
+      // ==================== 消息持久化 ====================
+      // 先存 DB 再更新 Redux，确保 UI 显示的数据一定已持久化，避免数据不一致
       await saveMessageAndBlocksToDB(topicId, userMessage, userMessageBlocks)
       dispatch(newMessagesActions.addMessage({ topicId, message: userMessage }))
       if (userMessageBlocks.length > 0) {
@@ -902,14 +934,19 @@ export const sendMessage =
       }
       dispatch(updateTopicUpdatedAt({ topicId }))
 
+      // ==================== 队列机制 ====================
+      // 每个 topic 有独立队列，保证同 topic 的消息按顺序处理，避免并发导致的响应乱序
       const queue = getTopicQueue(topicId)
 
+      // ==================== 三种响应分支 ====================
       if (activeAgentSession) {
+        // 分支 1: Agent 会话模式 - 需要维护 session 上下文
         const assistantMessage = createAssistantMessage(assistant.id, topicId, {
           askId: userMessage.id,
           model: assistant.model,
           traceId: userMessage.traceId
         })
+        // 助手消息也需要关联 agentSessionId，保持会话链完整
         if (activeAgentSession.agentSessionId && !assistantMessage.agentSessionId) {
           assistantMessage.agentSessionId = activeAgentSession.agentSessionId
         }
@@ -929,8 +966,10 @@ export const sendMessage =
         const mentionedModels = userMessage.mentions
 
         if (mentionedModels && mentionedModels.length > 0) {
+          // 分支 2: 多模型并行响应模式 - 用户 @ 提及了多个模型
           await dispatchMultiModelResponses(dispatch, getState, topicId, userMessage, assistant, mentionedModels)
         } else {
+          // 分支 3: 普通助手对话 - 标准单模型对话流程
           const assistantMessage = createAssistantMessage(assistant.id, topicId, {
             askId: userMessage.id,
             model: assistant.model,
@@ -947,6 +986,7 @@ export const sendMessage =
     } catch (error) {
       logger.error('Error in sendMessage thunk:', error as Error)
     } finally {
+      // 无论成功失败，都要结束 topic 的 loading 状态，避免 UI 卡住
       finishTopicLoading(topicId)
     }
   }

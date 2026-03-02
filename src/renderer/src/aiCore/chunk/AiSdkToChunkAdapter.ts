@@ -97,7 +97,7 @@ export class AiSdkToChunkAdapter {
         const { done, value } = await reader.read()
 
         if (done) {
-          // Flush any remaining content from link converter buffer if web search is enabled
+          // 如果启用了网页搜索，则清空链接，转换缓冲区中的剩余内容
           if (this.enableWebSearch) {
             const remainingText = flushLinkConverterBuffer()
             if (remainingText) {

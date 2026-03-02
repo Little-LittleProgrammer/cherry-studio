@@ -49,13 +49,13 @@ Cherry Studio 是一个基于 **Electron** 的跨平台 AI 桌面应用，采用
 
 ### 1.1 核心目录结构
 
-| 目录 | 说明 |
-|------|------|
-| `src/main/` | 主进程 (Node.js 后端) |
-| `src/preload/` | 预加载脚本 (IPC 桥接) |
-| `src/renderer/` | 渲染进程 (React 前端) |
-| `packages/shared/` | 共享类型和常量 |
-| `packages/aiCore/` | AI SDK 核心包 |
+| 目录                 | 说明               |
+| ------------------ | ---------------- |
+| `src/main/`        | 主进程 (Node.js 后端) |
+| `src/preload/`     | 预加载脚本 (IPC 桥接)   |
+| `src/renderer/`    | 渲染进程 (React 前端)  |
+| `packages/shared/` | 共享类型和常量          |
+| `packages/aiCore/` | AI SDK 核心包       |
 
 ### 1.2 渲染进程核心模块
 
@@ -91,6 +91,7 @@ src/renderer/src/
 **文件**: `src/shared/IpcChannel.ts`
 
 主要通道类别:
+
 - **App**: 应用控制 (quit, reload, theme, proxy 等)
 - **File**: 文件操作 (read, write, select, save 等)
 - **KnowledgeBase**: 知识库操作
@@ -177,6 +178,87 @@ export const sendMessage = (userMessage, userMessageBlocks, assistant, topicId, 
       await fetchAndProcessAssistantResponseImpl(dispatch, getState, topicId, assistant, assistantMessage)
     })
   }
+```
+
+##### 3.2.1.1 三种会话模式
+
+1. **Agent 会话模式** (`activeAgentSession` 存在)
+    - 调用 `fetchAndProcessAgentResponseImpl`
+    - 需要维护 Agent Session 上下文，确保对话连续性
+2. **多模型并行响应模式** (`mentionedModels.length > 0`)
+    - 调用 `dispatchMultiModelResponses`
+    - 用户通过 @ 提及多个模型，并行请求多个模型响应
+3. **普通助手对话** (默认)
+    - 调用 `fetchAndProcessAssistantResponseImpl`
+    - 标准的单模型对话流程
+
+##### 3.2.1.2 Agent 会话模式
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    Agent 会话模式流程                              │
+├──────────────────────────────────────────────────────────────────┤
+│  1. 设置 loading 状态                                              │
+│  2. 创建 BlockManager (管理消息块的增量更新)                          │
+│  3. 创建回调函数 & 流处理器                                          │
+│  4. 发送 LLM_RESPONSE_CREATED 事件 (触发 pending UI)                │
+│  5. 获取用户消息内容                                                 │
+│  6. 创建 AbortController (支持取消请求)                              │
+│  7. 调用 createAgentMessageStream() 与 Agent 后端建立流连接           │
+│  8. AiSdkToChunkAdapter 处理流数据                                  │
+│  9. 持久化 agentSessionId (维护会话链)                               │
+│  10. 重命名 Agent Session (如需要)                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+##### 3.2.1.3 多模型并行响应模式
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                   多模型并行响应模式流程                             │
+├──────────────────────────────────────────────────────────────────┤
+│  用户消息 @modelA @modelB @modelC                                  │
+│           │                                                        │
+│           ▼                                                        │
+│  ┌─────────────────────────────────────────────────────────────┐  │
+│  │ for (mentionedModel of mentionedModels) {                   │  │
+│  │   1. 创建 assistantConfig = { ...assistant, model }         │  │
+│  │   2. 创建 assistantMessage (每个模型一条)                     │  │
+│  │   3. 添加到 Redux store                                      │  │
+│  │   4. 收集到 tasksToQueue                                     │  │
+│  │ }                                                            │  │
+│  └─────────────────────────────────────────────────────────────┘  │
+│           │                                                        │
+│           ▼                                                        │
+│  批量保存到 DB                                                      │
+│           │                                                        │
+│           ▼                                                        │
+│  ┌─────────────────────────────────────────────────────────────┐  │
+│  │ for (task of tasksToQueue) {                                │  │
+│  │   queue.add(() => fetchAndProcessAssistantResponseImpl())   │  │
+│  │ }  // 并行加入队列，顺序执行                                    │  │
+│  └─────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+##### 3.2.1.4 普通助手对话
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                   普通助手对话模式流程                               │
+├──────────────────────────────────────────────────────────────────┤
+│  1. 拼接 Topic Prompt (话题级提示词)                                │
+│  2. 设置 loading 状态                                              │
+│  3. 创建 BlockManager                                              │
+│  4. 构建上下文消息列表:                                             │
+│     - 查找用户消息位置                                              │
+│     - 截取该位置之前的消息作为上下文                                  │
+│     - 过滤掉 status 包含 'ing' 的消息 (避免使用进行中的消息)          │
+│  5. 创建回调函数 & 流处理器                                         │
+│  6. 创建 AbortController                                           │
+│  7. 调用 transformMessagesAndFetch() 发送 LLM 请求                  │
+└──────────────────────────────────────────────────────────────────┘
+
 ```
 
 #### 3.2.2 fetchAndProcessAssistantResponseImpl 函数
@@ -336,17 +418,17 @@ class AiProvider {
 
 支持的客户端:
 
-| Provider Type | 客户端类 | 说明 |
-|---------------|----------|------|
-| `openai` | OpenAIAPIClient | OpenAI API |
-| `azure-openai` | OpenAIAPIClient | Azure OpenAI |
-| `openai-response` | OpenAIResponseAPIClient | OpenAI Response API |
-| `anthropic` | AnthropicAPIClient | Anthropic API |
-| `anthropic-vertex` | AnthropicVertexAPIClient | Anthropic Vertex AI |
-| `gemini` | GeminiAPIClient | Google Gemini |
-| `vertex` | VertexAPIClient | Google Vertex AI |
-| `aws-bedrock` | AwsBedrockAPIClient | AWS Bedrock |
-| 特殊 ID | CherryAiAPIClient, AihubmixAPIClient, NewAPIClient | 特殊提供商 |
+| Provider Type      | 客户端类                                               | 说明                  |
+| ------------------ | -------------------------------------------------- | ------------------- |
+| `openai`           | OpenAIAPIClient                                    | OpenAI API          |
+| `azure-openai`     | OpenAIAPIClient                                    | Azure OpenAI        |
+| `openai-response`  | OpenAIResponseAPIClient                            | OpenAI Response API |
+| `anthropic`        | AnthropicAPIClient                                 | Anthropic API       |
+| `anthropic-vertex` | AnthropicVertexAPIClient                           | Anthropic Vertex AI |
+| `gemini`           | GeminiAPIClient                                    | Google Gemini       |
+| `vertex`           | VertexAPIClient                                    | Google Vertex AI    |
+| `aws-bedrock`      | AwsBedrockAPIClient                                | AWS Bedrock         |
+| 特殊 ID              | CherryAiAPIClient, AihubmixAPIClient, NewAPIClient | 特殊提供商               |
 
 ```typescript
 export class ApiClientFactory {
@@ -375,6 +457,7 @@ export class ApiClientFactory {
 **文件**: `src/renderer/src/aiCore/prepareParams/index.ts`
 
 负责:
+
 - 消息格式转换 (`messageConverter.ts`)
 - 模型参数处理 (`modelParameters.ts`)
 - 文件处理 (`fileProcessor.ts`)
@@ -446,21 +529,21 @@ class OpenAIRequestTransformer {
 
 **文件**: `src/renderer/src/aiCore/legacy/middleware/register.ts`
 
-| 顺序 | 中间件 | 职责 | 文件 |
-|------|--------|------|------|
-| 1 | FinalChunkConsumerMiddleware | 最终块消费 | `common/FinalChunkConsumerMiddleware.ts` |
-| 2 | ErrorHandlerMiddleware | 捕获并处理错误 | `common/ErrorHandlerMiddleware.ts` |
-| 3 | TransformCoreToSdkParamsMiddleware | 参数转换为 SDK 格式 | `core/TransformCoreToSdkParamsMiddleware.ts` |
-| 4 | AbortHandlerMiddleware | 处理中断请求 | `common/AbortHandlerMiddleware.ts` |
-| 5 | McpToolChunkMiddleware | 处理 MCP 工具调用 | `core/McpToolChunkMiddleware.ts` |
-| 6 | TextChunkMiddleware | 处理文本块 | `core/TextChunkMiddleware.ts` |
-| 7 | WebSearchMiddleware | 处理网页搜索 | `core/WebSearchMiddleware.ts` |
-| 8 | ToolUseExtractionMiddleware | 提取工具调用 | `feat/ToolUseExtractionMiddleware.ts` |
-| 9 | ThinkingTagExtractionMiddleware | 提取思考内容 | `feat/ThinkingTagExtractionMiddleware.ts` |
-| 10 | ThinkChunkMiddleware | 思考块处理 | `core/ThinkChunkMiddleware.ts` |
-| 11 | ResponseTransformMiddleware | 响应转换 | `core/ResponseTransformMiddleware.ts` |
-| 12 | StreamAdapterMiddleware | 流适配器 | `core/StreamAdapterMiddleware.ts` |
-| 13 | RawStreamListenerMiddleware | 原始流监听器 | `core/RawStreamListenerMiddleware.ts` |
+| 顺序  | 中间件                                | 职责           | 文件                                           |
+| --- | ---------------------------------- | ------------ | -------------------------------------------- |
+| 1   | FinalChunkConsumerMiddleware       | 最终块消费        | `common/FinalChunkConsumerMiddleware.ts`     |
+| 2   | ErrorHandlerMiddleware             | 捕获并处理错误      | `common/ErrorHandlerMiddleware.ts`           |
+| 3   | TransformCoreToSdkParamsMiddleware | 参数转换为 SDK 格式 | `core/TransformCoreToSdkParamsMiddleware.ts` |
+| 4   | AbortHandlerMiddleware             | 处理中断请求       | `common/AbortHandlerMiddleware.ts`           |
+| 5   | McpToolChunkMiddleware             | 处理 MCP 工具调用  | `core/McpToolChunkMiddleware.ts`             |
+| 6   | TextChunkMiddleware                | 处理文本块        | `core/TextChunkMiddleware.ts`                |
+| 7   | WebSearchMiddleware                | 处理网页搜索       | `core/WebSearchMiddleware.ts`                |
+| 8   | ToolUseExtractionMiddleware        | 提取工具调用       | `feat/ToolUseExtractionMiddleware.ts`        |
+| 9   | ThinkingTagExtractionMiddleware    | 提取思考内容       | `feat/ThinkingTagExtractionMiddleware.ts`    |
+| 10  | ThinkChunkMiddleware               | 思考块处理        | `core/ThinkChunkMiddleware.ts`               |
+| 11  | ResponseTransformMiddleware        | 响应转换         | `core/ResponseTransformMiddleware.ts`        |
+| 12  | StreamAdapterMiddleware            | 流适配器         | `core/StreamAdapterMiddleware.ts`            |
+| 13  | RawStreamListenerMiddleware        | 原始流监听器       | `core/RawStreamListenerMiddleware.ts`        |
 
 ### 5.3 中间件类型定义
 
@@ -661,23 +744,25 @@ export function createStreamProcessor(callbacks: StreamProcessorCallbacks = {}) 
 
 Cherry Studio 支持三种类型的工具:
 
-| 类型 | 说明 | 示例 |
-|------|------|------|
-| `mcp` | MCP 服务器提供的工具 | 文件操作、数据库查询等 |
-| `builtin` | 内置工具 | `think` (思考工具) |
-| `provider` | 提供商原生工具 | `web_search` (Web 搜索) |
+| 类型         | 说明           | 示例                    |
+| ---------- | ------------ | --------------------- |
+| `mcp`      | MCP 服务器提供的工具 | 文件操作、数据库查询等           |
+| `builtin`  | 内置工具         | `think` (思考工具)        |
+| `provider` | 提供商原生工具      | `web_search` (Web 搜索) |
 
 ### 7.2 MCP 服务架构
 
 **文件**: `src/main/services/MCPService.ts`
 
 MCP (Model Context Protocol) 服务负责:
+
 - MCP 服务器生命周期管理
 - 工具列表获取
 - 工具调用执行
 - 资源/Prompt 访问
 
 支持多种传输方式:
+
 - **StdioClientTransport**: 标准输入输出
 - **SSEClientTransport**: Server-Sent Events
 - **StreamableHTTPClientTransport**: HTTP 流
@@ -978,11 +1063,11 @@ class KnowledgeService {
 
 **文件**: `src/main/knowledge/embedjs/embeddings/EmbeddingsFactory.ts`
 
-| 提供者 | 实现类 | 特点 |
-|--------|--------|------|
-| OpenAI/Azure | OpenAiEmbeddings | 支持自定义 dimensions |
-| Ollama | OllamaEmbeddings | 本地模型支持 |
-| Voyage AI | VoyageEmbeddings | 专用嵌入模型，batchSize=8 |
+| 提供者          | 实现类              | 特点                 |
+| ------------ | ---------------- | ------------------ |
+| OpenAI/Azure | OpenAiEmbeddings | 支持自定义 dimensions   |
+| Ollama       | OllamaEmbeddings | 本地模型支持             |
+| Voyage AI    | VoyageEmbeddings | 专用嵌入模型，batchSize=8 |
 
 ### 8.5 文档加载器
 
@@ -1071,10 +1156,10 @@ export const knowledgeSearchTool = (assistant, extractedKeywords, topicId, userM
 
 ### 8.8 两种检索模式
 
-| 模式 | 行为 | 适用场景 |
-|------|------|----------|
-| `on` (自动) | 使用意图识别提取关键词搜索 | 复杂查询，需要 AI 理解意图 |
-| `off` (直接) | 直接使用用户消息内容搜索 | 简单查询，精确匹配 |
+| 模式         | 行为            | 适用场景            |
+| ---------- | ------------- | --------------- |
+| `on` (自动)  | 使用意图识别提取关键词搜索 | 复杂查询，需要 AI 理解意图 |
+| `off` (直接) | 直接使用用户消息内容搜索  | 简单查询，精确匹配       |
 
 ### 8.9 引用提示词
 
@@ -1092,6 +1177,7 @@ REFERENCE_PROMPT = `Please answer the question based on the reference materials
 ### 8.10 预处理系统
 
 支持的预处理服务:
+
 - **Doc2x** - 专业文档解析
 - **Mistral** - OCR 识别
 - **Mineru** - 开源文档解析
@@ -1100,16 +1186,15 @@ REFERENCE_PROMPT = `Please answer the question based on the reference materials
 
 ### 8.11 IPC 通道
 
-| 通道 | 功能 |
-|------|------|
+| 通道                     | 功能    |
+| ---------------------- | ----- |
 | `KnowledgeBase_Create` | 创建知识库 |
 | `KnowledgeBase_Delete` | 删除知识库 |
-| `KnowledgeBase_Add` | 添加文档 |
-| `KnowledgeBase_Remove` | 移除文档 |
-| `KnowledgeBase_Search` | 搜索 |
-| `KnowledgeBase_Rerank` | 重排序 |
-| `KnowledgeBase_Reset` | 重置 |
-```
+| `KnowledgeBase_Add`    | 添加文档  |
+| `KnowledgeBase_Remove` | 移除文档  |
+| `KnowledgeBase_Search` | 搜索    |
+| `KnowledgeBase_Rerank` | 重排序   |
+| `KnowledgeBase_Reset`  | 重置    |
 
 ---
 
@@ -1118,6 +1203,7 @@ REFERENCE_PROMPT = `Please answer the question based on the reference materials
 ### 9.1 记忆系统架构
 
 ```
+
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              Renderer Process                                │
 ├─────────────────────────────────────────────────────────────────────────────┤
@@ -1164,6 +1250,7 @@ REFERENCE_PROMPT = `Please answer the question based on the reference materials
 │  │  └───────────────────────┘                                           │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
+
 ```
 
 ### 9.2 记忆服务
@@ -1192,14 +1279,14 @@ class MemoryService {
 
 ### 9.3 技术实现
 
-| 特性 | 实现 |
-|------|------|
-| 数据库 | LibSQL (SQLite) |
-| 向量存储 | 支持原生向量 |
-| 向量维度 | 统一 1536 维 (填充/截断) |
-| 去重机制 | SHA256 哈希 |
-| 相似度阈值 | 0.85 (85%) |
-| 软删除 | `is_deleted` 标志 |
+| 特性    | 实现                |
+| ----- | ----------------- |
+| 数据库   | LibSQL (SQLite)   |
+| 向量存储  | 支持原生向量            |
+| 向量维度  | 统一 1536 维 (填充/截断) |
+| 去重机制  | SHA256 哈希         |
+| 相似度阈值 | 0.85 (85%)        |
+| 软删除   | `is_deleted` 标志   |
 
 ### 9.4 记忆 Redux 配置
 
@@ -1305,6 +1392,7 @@ Relevant memories returned to AI context
 ### 9.9 用户和助手关联
 
 记忆支持多租户:
+
 - **User ID (`user_id`)**: 隔离不同用户的记忆 (default: `default-user`)
 - **Agent ID (`agent_id`)**: 关联特定助手的记忆
 
@@ -1418,17 +1506,18 @@ export const ErrorHandlerMiddleware = () => (next) => async (ctx, params) => {
 
 **智谱 AI 特定错误码**:
 
-| 错误码 | i18n Key | 说明 |
-|--------|----------|------|
-| 401 | `chat.no_api_key` | API Key 无效或令牌过期 |
-| 1304 | `chat.quota_exceeded` | 配额用尽 |
-| 1113 | `chat.insufficient_balance` | 余额不足 |
+| 错误码  | i18n Key                    | 说明              |
+| ---- | --------------------------- | --------------- |
+| 401  | `chat.no_api_key`           | API Key 无效或令牌过期 |
+| 1304 | `chat.quota_exceeded`       | 配额用尽            |
+| 1113 | `chat.insufficient_balance` | 余额不足            |
 
 ### 10.4 错误类型系统
 
 **文件**: `src/renderer/src/types/error.ts`
 
 支持的 AI SDK 错误类型:
+
 - `SerializedAiSdkAPICallError` - API 调用错误
 - `SerializedAiSdkDownloadError` - 下载错误
 - `SerializedAiSdkRetryError` - 重试错误
@@ -1548,20 +1637,20 @@ onError: async (error: AISDKError) => {
 
 #### 错误边界组件
 
-| 组件 | 文件 | 用途 |
-|------|------|------|
-| ErrorBoundary | `components/ErrorBoundary.tsx` | 全局错误边界 |
-| MessageErrorBoundary | `pages/home/Messages/MessageErrorBoundary.tsx` | 消息渲染错误 |
-| BlockErrorFallback | `pages/home/Messages/Blocks/BlockErrorFallback.tsx` | Block 错误回退 |
+| 组件                   | 文件                                                  | 用途         |
+| -------------------- | --------------------------------------------------- | ---------- |
+| ErrorBoundary        | `components/ErrorBoundary.tsx`                      | 全局错误边界     |
+| MessageErrorBoundary | `pages/home/Messages/MessageErrorBoundary.tsx`      | 消息渲染错误     |
+| BlockErrorFallback   | `pages/home/Messages/Blocks/BlockErrorFallback.tsx` | Block 错误回退 |
 
 ### 10.10 超时配置
 
-| 场景 | 超时时间 |
-|------|----------|
-| 默认请求 | 30 秒 |
-| Flex 服务层级 | 15 分钟 |
-| 网络请求 (fetch) | 30 秒 |
-| MCP 工具调用 | 默认 60 秒 (可配置) |
+| 场景           | 超时时间          |
+| ------------ | ------------- |
+| 默认请求         | 30 秒          |
+| Flex 服务层级    | 15 分钟         |
+| 网络请求 (fetch) | 30 秒          |
+| MCP 工具调用     | 默认 60 秒 (可配置) |
 
 ---
 
@@ -1595,17 +1684,17 @@ const persistedReducer = persistReducer({
 
 ### 11.2 主要 Store Slice
 
-| Slice | 用途 |
-|-------|------|
-| `llm` | LLM 提供商和模型配置 |
-| `assistants` | 助手配置 |
-| `knowledge` | 知识库列表和配置 |
-| `memory` | 全局记忆配置 |
-| `mcp` | MCP 服务器列表 |
-| `messages` | 当前话题的消息 |
-| `messageBlocks` | 消息块 |
-| `settings` | 应用设置 |
-| `runtime` | 运行时状态（临时） |
+| Slice           | 用途           |
+| --------------- | ------------ |
+| `llm`           | LLM 提供商和模型配置 |
+| `assistants`    | 助手配置         |
+| `knowledge`     | 知识库列表和配置     |
+| `memory`        | 全局记忆配置       |
+| `mcp`           | MCP 服务器列表    |
+| `messages`      | 当前话题的消息      |
+| `messageBlocks` | 消息块          |
+| `settings`      | 应用设置         |
+| `runtime`       | 运行时状态（临时）    |
 
 ---
 
@@ -1901,21 +1990,21 @@ const PlaceholderBlock: React.FC<Props> = ({ block }) => {
 
 ### 12.9 性能优化
 
-| 优化策略 | 实现方式 |
-|----------|----------|
-| 节流更新 | Block 内容更新节流 (150ms) |
-| RAF 调度 | 使用 `requestAnimationFrame` 进行 Redux 更新 |
-| 规范化状态 | Messages 和 Blocks 分开存储，通过 ID 关联 |
+| 优化策略   | 实现方式                                                          |
+| ------ | ------------------------------------------------------------- |
+| 节流更新   | Block 内容更新节流 (150ms)                                          |
+| RAF 调度 | 使用 `requestAnimationFrame` 进行 Redux 更新                        |
+| 规范化状态  | Messages 和 Blocks 分开存储，通过 ID 关联                               |
 | 记忆化选择器 | `selectMessagesForTopic`, `selectFormattedCitationsByBlockId` |
-| 动画优化 | 使用 `framer-motion` (`motion/react`) 实现平滑动画 |
+| 动画优化   | 使用 `framer-motion` (`motion/react`) 实现平滑动画                    |
 
 ### 12.10 流式更新策略
 
-| 阶段 | 行为 |
-|------|------|
-| 流式期间 | 节流更新到 Redux 和 DB |
-| 完成时 | 立即更新，取消节流，刷入 DB |
-| Block 类型变化 | 取消前一个块的节流，立即更新 |
+| 阶段         | 行为               |
+| ---------- | ---------------- |
+| 流式期间       | 节流更新到 Redux 和 DB |
+| 完成时        | 立即更新，取消节流，刷入 DB  |
+| Block 类型变化 | 取消前一个块的节流，立即更新   |
 
 ---
 
@@ -2066,117 +2155,117 @@ const PlaceholderBlock: React.FC<Props> = ({ block }) => {
 
 ### 请求发起
 
-| 文件 | 说明 |
-|------|------|
-| `src/renderer/src/store/thunk/messageThunk.ts` | 消息发送 Redux Thunk |
-| `src/renderer/src/services/ApiService.ts` | API 调用服务 |
-| `src/renderer/src/services/ConversationService.ts` | 对话消息准备 |
+| 文件                                                 | 说明               |
+| -------------------------------------------------- | ---------------- |
+| `src/renderer/src/store/thunk/messageThunk.ts`     | 消息发送 Redux Thunk |
+| `src/renderer/src/services/ApiService.ts`          | API 调用服务         |
+| `src/renderer/src/services/ConversationService.ts` | 对话消息准备           |
 
 ### AI 核心
 
-| 文件 | 说明 |
-|------|------|
-| `src/renderer/src/aiCore/legacy/index.ts` | Legacy AiProvider 主入口 |
-| `src/renderer/src/aiCore/index_new.ts` | Modern AiProvider (aisdk v6) |
-| `src/renderer/src/aiCore/legacy/clients/ApiClientFactory.ts` | API 客户端工厂 |
-| `src/renderer/src/aiCore/prepareParams/parameterBuilder.ts` | 参数构建器 |
+| 文件                                                           | 说明                           |
+| ------------------------------------------------------------ | ---------------------------- |
+| `src/renderer/src/aiCore/legacy/index.ts`                    | Legacy AiProvider 主入口        |
+| `src/renderer/src/aiCore/index_new.ts`                       | Modern AiProvider (aisdk v6) |
+| `src/renderer/src/aiCore/legacy/clients/ApiClientFactory.ts` | API 客户端工厂                    |
+| `src/renderer/src/aiCore/prepareParams/parameterBuilder.ts`  | 参数构建器                        |
 
 ### 中间件
 
-| 文件 | 说明 |
-|------|------|
-| `src/renderer/src/aiCore/legacy/middleware/register.ts` | 中间件注册表 |
-| `src/renderer/src/aiCore/legacy/middleware/builder.ts` | 中间件构建器 |
-| `src/renderer/src/aiCore/legacy/middleware/composer.ts` | 中间件组合器 |
-| `src/renderer/src/aiCore/legacy/middleware/common/ErrorHandlerMiddleware.ts` | 错误处理 |
-| `src/renderer/src/aiCore/legacy/middleware/common/AbortHandlerMiddleware.ts` | 中断处理 |
-| `src/renderer/src/aiCore/legacy/middleware/core/McpToolChunkMiddleware.ts` | MCP 工具处理 |
-| `src/renderer/src/aiCore/legacy/middleware/feat/ToolUseExtractionMiddleware.ts` | 工具调用提取 |
-| `src/renderer/src/aiCore/legacy/middleware/feat/ThinkingTagExtractionMiddleware.ts` | 思考标签提取 |
+| 文件                                                                                  | 说明       |
+| ----------------------------------------------------------------------------------- | -------- |
+| `src/renderer/src/aiCore/legacy/middleware/register.ts`                             | 中间件注册表   |
+| `src/renderer/src/aiCore/legacy/middleware/builder.ts`                              | 中间件构建器   |
+| `src/renderer/src/aiCore/legacy/middleware/composer.ts`                             | 中间件组合器   |
+| `src/renderer/src/aiCore/legacy/middleware/common/ErrorHandlerMiddleware.ts`        | 错误处理     |
+| `src/renderer/src/aiCore/legacy/middleware/common/AbortHandlerMiddleware.ts`        | 中断处理     |
+| `src/renderer/src/aiCore/legacy/middleware/core/McpToolChunkMiddleware.ts`          | MCP 工具处理 |
+| `src/renderer/src/aiCore/legacy/middleware/feat/ToolUseExtractionMiddleware.ts`     | 工具调用提取   |
+| `src/renderer/src/aiCore/legacy/middleware/feat/ThinkingTagExtractionMiddleware.ts` | 思考标签提取   |
 
 ### 流处理
 
-| 文件 | 说明 |
-|------|------|
-| `src/renderer/src/services/StreamProcessingService.ts` | 流处理器 |
-| `src/renderer/src/aiCore/chunk/AiSdkToChunkAdapter.ts` | AI SDK 到 Chunk 适配器 |
-| `src/renderer/src/types/chunk.ts` | Chunk 类型定义 |
-| `src/renderer/src/services/messageStreaming/BlockManager.ts` | Block 管理器 |
-| `src/renderer/src/services/messageStreaming/callbacks/` | 流回调处理 |
+| 文件                                                           | 说明                 |
+| ------------------------------------------------------------ | ------------------ |
+| `src/renderer/src/services/StreamProcessingService.ts`       | 流处理器               |
+| `src/renderer/src/aiCore/chunk/AiSdkToChunkAdapter.ts`       | AI SDK 到 Chunk 适配器 |
+| `src/renderer/src/types/chunk.ts`                            | Chunk 类型定义         |
+| `src/renderer/src/services/messageStreaming/BlockManager.ts` | Block 管理器          |
+| `src/renderer/src/services/messageStreaming/callbacks/`      | 流回调处理              |
 
 ### 工具调用
 
-| 文件 | 说明 |
-|------|------|
-| `src/main/services/MCPService.ts` | MCP 服务 (主进程) |
-| `src/renderer/src/utils/mcp-tools.ts` | 工具调用工具函数 |
-| `src/renderer/src/store/toolPermissions.ts` | 工具权限状态 |
-| `src/renderer/src/types/tool.ts` | 工具类型定义 |
+| 文件                                          | 说明           |
+| ------------------------------------------- | ------------ |
+| `src/main/services/MCPService.ts`           | MCP 服务 (主进程) |
+| `src/renderer/src/utils/mcp-tools.ts`       | 工具调用工具函数     |
+| `src/renderer/src/store/toolPermissions.ts` | 工具权限状态       |
+| `src/renderer/src/types/tool.ts`            | 工具类型定义       |
 
 ### 知识库
 
-| 文件 | 说明 |
-|------|------|
-| `src/main/services/KnowledgeService.ts` | 知识库服务 (主进程) |
-| `src/renderer/src/services/KnowledgeService.ts` | 知识库服务 (渲染进程) |
-| `src/renderer/src/aiCore/tools/KnowledgeSearchTool.ts` | 知识库搜索工具 |
-| `src/renderer/src/store/knowledge.ts` | 知识库状态管理 |
-| `src/renderer/src/queue/KnowledgeQueue.ts` | 知识库处理队列 |
-| `src/main/knowledge/embedjs/embeddings/EmbeddingsFactory.ts` | 嵌入模型工厂 |
-| `src/main/knowledge/reranker/Reranker.ts` | 重排序器 |
+| 文件                                                           | 说明           |
+| ------------------------------------------------------------ | ------------ |
+| `src/main/services/KnowledgeService.ts`                      | 知识库服务 (主进程)  |
+| `src/renderer/src/services/KnowledgeService.ts`              | 知识库服务 (渲染进程) |
+| `src/renderer/src/aiCore/tools/KnowledgeSearchTool.ts`       | 知识库搜索工具      |
+| `src/renderer/src/store/knowledge.ts`                        | 知识库状态管理      |
+| `src/renderer/src/queue/KnowledgeQueue.ts`                   | 知识库处理队列      |
+| `src/main/knowledge/embedjs/embeddings/EmbeddingsFactory.ts` | 嵌入模型工厂       |
+| `src/main/knowledge/reranker/Reranker.ts`                    | 重排序器         |
 
 ### 记忆
 
-| 文件 | 说明 |
-|------|------|
-| `src/main/services/memory/MemoryService.ts` | 记忆服务 (主进程) |
-| `src/renderer/src/services/MemoryService.ts` | 记忆服务 (渲染进程) |
-| `src/renderer/src/services/MemoryProcessor.ts` | 记忆处理器 |
-| `src/renderer/src/aiCore/tools/MemorySearchTool.ts` | 记忆搜索工具 |
-| `src/renderer/src/store/memory.ts` | 记忆状态管理 |
-| `src/renderer/src/utils/memory-prompts.ts` | 记忆 LLM 提示词 |
+| 文件                                                  | 说明          |
+| --------------------------------------------------- | ----------- |
+| `src/main/services/memory/MemoryService.ts`         | 记忆服务 (主进程)  |
+| `src/renderer/src/services/MemoryService.ts`        | 记忆服务 (渲染进程) |
+| `src/renderer/src/services/MemoryProcessor.ts`      | 记忆处理器       |
+| `src/renderer/src/aiCore/tools/MemorySearchTool.ts` | 记忆搜索工具      |
+| `src/renderer/src/store/memory.ts`                  | 记忆状态管理      |
+| `src/renderer/src/utils/memory-prompts.ts`          | 记忆 LLM 提示词  |
 
 ### 错误处理
 
-| 文件 | 说明 |
-|------|------|
-| `src/renderer/src/aiCore/legacy/middleware/common/ErrorHandlerMiddleware.ts` | 错误处理中间件 |
-| `src/renderer/src/utils/error.ts` | 错误工具函数 |
-| `src/renderer/src/types/error.ts` | 错误类型定义 |
-| `src/renderer/src/utils/abortController.ts` | AbortController 管理 |
-| `src/renderer/src/pages/home/Messages/Blocks/ErrorBlock.tsx` | 错误块 UI 组件 |
-| `src/renderer/src/components/ErrorDetailModal/index.tsx` | 错误详情弹窗 |
+| 文件                                                                           | 说明                 |
+| ---------------------------------------------------------------------------- | ------------------ |
+| `src/renderer/src/aiCore/legacy/middleware/common/ErrorHandlerMiddleware.ts` | 错误处理中间件            |
+| `src/renderer/src/utils/error.ts`                                            | 错误工具函数             |
+| `src/renderer/src/types/error.ts`                                            | 错误类型定义             |
+| `src/renderer/src/utils/abortController.ts`                                  | AbortController 管理 |
+| `src/renderer/src/pages/home/Messages/Blocks/ErrorBlock.tsx`                 | 错误块 UI 组件          |
+| `src/renderer/src/components/ErrorDetailModal/index.tsx`                     | 错误详情弹窗             |
 
 ### 状态管理
 
-| 文件 | 说明 |
-|------|------|
-| `src/renderer/src/store/index.ts` | Redux Store 配置 |
-| `src/renderer/src/store/newMessage.ts` | 消息状态 |
-| `src/renderer/src/store/messageBlock.ts` | 消息块状态 |
-| `src/renderer/src/store/assistants.ts` | 助手配置 |
-| `src/renderer/src/store/llm.ts` | LLM/Provider 配置 |
-| `src/renderer/src/store/settings.ts` | 应用设置 |
+| 文件                                       | 说明              |
+| ---------------------------------------- | --------------- |
+| `src/renderer/src/store/index.ts`        | Redux Store 配置  |
+| `src/renderer/src/store/newMessage.ts`   | 消息状态            |
+| `src/renderer/src/store/messageBlock.ts` | 消息块状态           |
+| `src/renderer/src/store/assistants.ts`   | 助手配置            |
+| `src/renderer/src/store/llm.ts`          | LLM/Provider 配置 |
+| `src/renderer/src/store/settings.ts`     | 应用设置            |
 
 ### UI 组件
 
-| 文件 | 说明 |
-|------|------|
-| `src/renderer/src/pages/home/Chat.tsx` | 聊天主页面 |
-| `src/renderer/src/pages/home/Messages/Messages.tsx` | 消息列表 |
-| `src/renderer/src/pages/home/Messages/Message.tsx` | 消息项 |
-| `src/renderer/src/pages/home/Messages/MessageContent.tsx` | 消息内容 |
-| `src/renderer/src/pages/home/Messages/Blocks/index.tsx` | 消息块渲染器 |
-| `src/renderer/src/pages/home/Messages/Blocks/MainTextBlock.tsx` | 文本块 |
-| `src/renderer/src/pages/home/Messages/Blocks/ThinkingBlock.tsx` | 思考块 |
-| `src/renderer/src/pages/home/Messages/Blocks/ToolBlock.tsx` | 工具块 |
-| `src/renderer/src/pages/home/Markdown/Markdown.tsx` | Markdown 渲染 |
-| `src/renderer/src/pages/home/Markdown/CodeBlock.tsx` | 代码块渲染 |
+| 文件                                                              | 说明          |
+| --------------------------------------------------------------- | ----------- |
+| `src/renderer/src/pages/home/Chat.tsx`                          | 聊天主页面       |
+| `src/renderer/src/pages/home/Messages/Messages.tsx`             | 消息列表        |
+| `src/renderer/src/pages/home/Messages/Message.tsx`              | 消息项         |
+| `src/renderer/src/pages/home/Messages/MessageContent.tsx`       | 消息内容        |
+| `src/renderer/src/pages/home/Messages/Blocks/index.tsx`         | 消息块渲染器      |
+| `src/renderer/src/pages/home/Messages/Blocks/MainTextBlock.tsx` | 文本块         |
+| `src/renderer/src/pages/home/Messages/Blocks/ThinkingBlock.tsx` | 思考块         |
+| `src/renderer/src/pages/home/Messages/Blocks/ToolBlock.tsx`     | 工具块         |
+| `src/renderer/src/pages/home/Markdown/Markdown.tsx`             | Markdown 渲染 |
+| `src/renderer/src/pages/home/Markdown/CodeBlock.tsx`            | 代码块渲染       |
 
 ### IPC 通信
 
-| 文件 | 说明 |
-|------|------|
-| `packages/shared/IpcChannel.ts` | IPC 通道定义 |
-| `src/preload/index.ts` | Preload 脚本 |
-| `src/main/ipc.ts` | 主进程 IPC 处理器 |
+| 文件                              | 说明          |
+| ------------------------------- | ----------- |
+| `packages/shared/IpcChannel.ts` | IPC 通道定义    |
+| `src/preload/index.ts`          | Preload 脚本  |
+| `src/main/ipc.ts`               | 主进程 IPC 处理器 |
