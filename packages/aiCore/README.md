@@ -413,6 +413,7 @@ await client.streamObject({
 
 ## 📚 相关资源
 
+- [📖 核心原理详解](./PRINCIPLES.md) - 深入理解 aiCore 的架构设计、数据流和扩展机制
 - [Vercel AI SDK 文档](https://ai-sdk.dev/)
 - [Cherry Studio 项目](https://github.com/CherryHQ/cherry-studio)
 - [AI SDK Providers](https://ai-sdk.dev/providers/ai-sdk-providers)
