@@ -140,37 +140,44 @@ artifactBuildCompleted: scripts/artifact-build-completed.js
 releaseInfo:
   releaseNotes: |
     <!--LANG:en-->
-    Cherry Studio 1.7.20 - New Models & Features
+    Cherry Studio 1.8.0 - Agents & Performance
 
     ✨ New Features
-    - [Models] Add support for Claude Sonnet 4.6 model with reasoning effort configuration
-    - [Models] Add support for Gemini 3.1 Pro models with reasoning effort and vision capabilities
-    - [Models] Add support for Qwen 3.5 series models
-    - [Models] Add support for Moonshot Kimi K2.5 series models (kimi-k2.5, kimi-k2-thinking, etc.)
-    - [Models] Add support for Zhipu GLM-5 model with thinking tokens and function calling
-    - [Models] Add support for Doubao Seed 2.0 models with function-calling capabilities
-    - [Mini Apps] Add proper region/language tags for all mini apps, pinned apps no longer filtered by region
-    - [Chat] Add keyboard shortcut Cmd+Shift+M (Ctrl+Shift+M) to open model selector
-    - [Search] Add keyword-based topic search with whole-word matching and result sorting
+    - [Agents] Added drag-and-drop manual sorting for agent and session lists
+    - [Models] Added MiniMax M2.5 highspeed model support
+    - [OpenClaw] Switch to binary installation to optimize the installation experience
 
     🐛 Bug Fixes
-    - [i18n] Fix PluginCard translation not updating when language is switched
-    - [OpenClaw] Fix installation failure on Windows when npm path contains spaces
+    - [Agents] Fixed deleting last accessible directory bug - delete button now disabled when only one remains
+    - [UI] Fixed web search providers not showing for local models (e.g., Ollama) in chat toolbar
+    - [Models] Fixed reasoning effort and summary mode not applying for some OpenAI-compatible providers
+    - [OpenClaw] Fixed OpenClaw gateway status detection for crashed/externally-stopped OpenClaw gateways
+    - [Gateway] Improved gateway startup error messages with detailed diagnostics
+    - [Poe] Fixed web_search parameter not being passed correctly when built-in search is enabled
+
+    💄 Improvements
+    - [Agents] Added configurable maximum tool calls setting (1-100) in assistant settings
+    - [UI] Added Windows Mica effect for better visual integration
+    - [Performance] Increased default request timeout from 10 to 30 minutes for slow local models
+
     <!--LANG:zh-CN-->
-    Cherry Studio 1.7.20 - 新模型与功能
+    Cherry Studio 1.8.0 - 智能体与性能
 
     ✨ 新功能
-    - [模型] 添加 Claude Sonnet 4.6 模型支持，包含推理配置
-    - [模型] 添加 Gemini 3.1 Pro 模型支持，包含推理能力和视觉功能
-    - [模型] 添加 Qwen 3.5 系列模型支持
-    - [模型] 添加 Moonshot Kimi K2.5 系列模型支持（kimi-k2.5、kimi-k2-thinking 等）
-    - [模型] 添加智谱 GLM-5 模型支持，包含思维令牌和函数调用
-    - [模型] 添加豆包 Seed 2.0 模型支持，包含函数调用能力
-    - [小程序] 为所有小程序添加正确的地区/语言标签，固定的小程序不再受地区过滤影响
-    - [聊天] 添加键盘快捷键 Cmd+Shift+M (Ctrl+Shift+M) 打开模型选择器
-    - [搜索] 添加基于关键词的话题搜索，支持全词匹配和结果排序
+    - [智能体] 新增智能体和会话列表的拖拽排序功能
+    - [模型] 新增 MiniMax M2.5 高速模型支持
+    - [OpenClaw] 改为二进制安装优化安装体验
 
     🐛 问题修复
-    - [国际化] 修复切换语言时插件卡片翻译不更新的问题
-    - [OpenClaw] 修复 Windows 上 npm 路径包含空格时的安装失败问题
+    - [智能体] 修复删除最后一个可访问目录的漏洞 - 只剩一个目录时禁用删除按钮
+    - [UI] 修复本地模型（如 Ollama）聊天工具栏中不显示网络搜索选项的问题
+    - [模型] 修复部分 OpenAI 兼容服务商的推理努力和摘要模式设置不生效的问题
+    - [OpenClaw] 修复OpenClaw网关状态检测无法识别崩溃/外部停止的OpenClaw网关的问题
+    - [网关] 改进网关启动错误消息，提供详细诊断信息
+    - [Poe] 修复启用内置搜索时 web_search 参数未正确传递的问题
+
+    💄 改进
+    - [智能体] 新增助手设置中的最大工具调用次数配置（1-100）
+    - [UI] 新增 Windows Mica 效果以提升视觉体验
+    - [性能] 将默认请求超时从 10 分钟增加到 30 分钟，优化慢速本地模型体验
     <!--LANG:END-->

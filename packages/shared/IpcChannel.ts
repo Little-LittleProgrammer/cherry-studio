@@ -7,9 +7,11 @@ export enum IpcChannel {
   App_SetSpellCheckLanguages = 'app:set-spell-check-languages',
   App_CheckForUpdate = 'app:check-for-update',
   App_QuitAndInstall = 'app:quit-and-install',
+  App_ManualInstallUpdate = 'app:manual-install-update',
   App_Reload = 'app:reload',
   App_Quit = 'app:quit',
   App_Info = 'app:info',
+  App_GetSigningInfo = 'app:get-signing-info',
   App_Proxy = 'app:proxy',
   App_SetLaunchToTray = 'app:set-launch-to-tray',
   App_SetTray = 'app:set-tray',
@@ -93,6 +95,7 @@ export enum IpcChannel {
   Mcp_CheckConnectivity = 'mcp:check-connectivity',
   Mcp_UploadDxt = 'mcp:upload-dxt',
   Mcp_AbortTool = 'mcp:abort-tool',
+  Mcp_ResolveHubTool = 'mcp:resolve-hub-tool',
   Mcp_GetServerVersion = 'mcp:get-server-version',
   Mcp_Progress = 'mcp:progress',
   Mcp_GetServerLogs = 'mcp:get-server-logs',
@@ -245,7 +248,7 @@ export enum IpcChannel {
   Backup_DeleteS3File = 'backup:deleteS3File',
   Backup_CheckS3Connection = 'backup:checkS3Connection',
   Backup_CreateLanTransferBackup = 'backup:createLanTransferBackup',
-  Backup_DeleteTempBackup = 'backup:deleteTempBackup',
+  Backup_DeleteLanTransferBackup = 'backup:deleteLanTransferBackup',
 
   // zip
   Zip_Compress = 'zip:compress',
@@ -411,21 +414,18 @@ export enum IpcChannel {
 
   // OpenClaw
   OpenClaw_CheckInstalled = 'openclaw:check-installed',
-  OpenClaw_CheckNodeVersion = 'openclaw:check-node-version',
-  OpenClaw_CheckGitAvailable = 'openclaw:check-git-available',
-  OpenClaw_GetNodeDownloadUrl = 'openclaw:get-node-download-url',
-  OpenClaw_GetGitDownloadUrl = 'openclaw:get-git-download-url',
   OpenClaw_Install = 'openclaw:install',
   OpenClaw_Uninstall = 'openclaw:uninstall',
   OpenClaw_InstallProgress = 'openclaw:install-progress',
   OpenClaw_StartGateway = 'openclaw:start-gateway',
   OpenClaw_StopGateway = 'openclaw:stop-gateway',
-  OpenClaw_RestartGateway = 'openclaw:restart-gateway',
   OpenClaw_GetStatus = 'openclaw:get-status',
   OpenClaw_CheckHealth = 'openclaw:check-health',
   OpenClaw_GetDashboardUrl = 'openclaw:get-dashboard-url',
   OpenClaw_SyncConfig = 'openclaw:sync-config',
   OpenClaw_GetChannels = 'openclaw:get-channels',
+  OpenClaw_CheckUpdate = 'openclaw:check-update',
+  OpenClaw_PerformUpdate = 'openclaw:perform-update',
 
   // Analytics
   Analytics_TrackTokenUsage = 'analytics:track-token-usage'

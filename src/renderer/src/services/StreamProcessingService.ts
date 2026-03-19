@@ -6,7 +6,7 @@ import type {
   NormalToolResponse,
   WebSearchResponse
 } from '@renderer/types'
-import type { Chunk } from '@renderer/types/chunk'
+import type { Chunk, ProviderMetadata } from '@renderer/types/chunk'
 import { ChunkType } from '@renderer/types/chunk'
 import type { Response } from '@renderer/types/newMessage'
 import { AssistantMessageStatus } from '@renderer/types/newMessage'
@@ -41,16 +41,11 @@ export interface StreamProcessorCallbacks {
 
   /** 文本块开始时调用，用于创建 MAIN_TEXT Block */
   onTextStart?: () => void
-
-  /** 文本增量内容到达时调用，用于更新 Block 内容（通常触发节流更新） */
-  onTextChunk?: (text: string) => void
-
-  /** 文本块完成时调用，用于标记 Block 状态为 SUCCESS */
-  onTextComplete?: (text: string) => void
-
-  // ==================== 思考/推理回调 ====================
-
-  /** 思考块开始时调用（Claude extended thinking、OpenAI o1 等） */
+  // Text content chunk received
+  onTextChunk?: (text: string, providerMetadata?: ProviderMetadata) => void
+  // Full text content received
+  onTextComplete?: (text: string, providerMetadata?: ProviderMetadata) => void
+  // thinking content start
   onThinkingStart?: () => void
 
   /** 思考内容增量到达时调用 */
@@ -183,13 +178,11 @@ export function createStreamProcessor(callbacks: StreamProcessorCallbacks = {}) 
           break
         }
         case ChunkType.TEXT_DELTA: {
-          // 文本增量 → 更新 Block 内容（节流更新）
-          if (callbacks.onTextChunk) callbacks.onTextChunk(data.text)
+          if (callbacks.onTextChunk) callbacks.onTextChunk(data.text, data.providerMetadata)
           break
         }
         case ChunkType.TEXT_COMPLETE: {
-          // 文本完成 → 标记 Block 为 SUCCESS（立即更新）
-          if (callbacks.onTextComplete) callbacks.onTextComplete(data.text)
+          if (callbacks.onTextComplete) callbacks.onTextComplete(data.text, data.providerMetadata)
           break
         }
 

@@ -10,7 +10,6 @@ import anthropicService from '@main/services/AnthropicService'
 import { getIpCountry } from '@main/utils/ipService'
 import {
   autoDiscoverGitBash,
-  checkGitAvailable,
   getBinaryPath,
   getGitBashPathInfo,
   isBinaryExists,
@@ -92,7 +91,7 @@ import { themeService } from './services/ThemeService'
 import VertexAIService from './services/VertexAIService'
 import { setOpenLinkExternal } from './services/WebviewService'
 import { windowService } from './services/WindowService'
-import { calculateDirectorySize, getDataPath, getResourcePath } from './utils'
+import { calculateDirectorySize, getResourcePath } from './utils'
 import { decrypt, encrypt } from './utils/aes'
 import {
   getCacheDir,
@@ -104,7 +103,6 @@ import {
   untildify
 } from './utils/file'
 import { updateAppDataConfig } from './utils/init'
-import { closeAllDataConnections } from './utils/lifecycle'
 import { getCpuName, getDeviceType, getHostname } from './utils/system'
 import { compress, decompress } from './utils/zip'
 
@@ -166,6 +164,8 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
     installPath: path.dirname(app.getPath('exe'))
   }))
 
+  ipcMain.handle(IpcChannel.App_GetSigningInfo, () => appService.getSigningInfo())
+
   ipcMain.handle(IpcChannel.App_Proxy, async (_, proxy: string, bypassRules?: string) => {
     let proxyConfig: ProxyConfig
 
@@ -187,6 +187,7 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
 
   // Update
   ipcMain.handle(IpcChannel.App_QuitAndInstall, () => appUpdater.quitAndInstall())
+  ipcMain.handle(IpcChannel.App_ManualInstallUpdate, () => appUpdater.manualInstallUpdate())
 
   // language
   ipcMain.handle(IpcChannel.App_SetLanguage, (_, language) => {
@@ -495,15 +496,7 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   })
 
   // Reset all data (factory reset)
-  // Best-effort: close handles then delete. Failures are logged but not thrown,
-  // because the caller must always proceed to relaunchApp() — process exit
-  // releases any remaining handles, and services auto-recreate on next start.
-  ipcMain.handle(IpcChannel.App_ResetData, async () => {
-    await closeAllDataConnections()
-    await fs.promises.rm(getDataPath(), { recursive: true, force: true }).catch((e) => {
-      logger.warn('Failed to remove Data directory (will be cleaned up on restart)', e as Error)
-    })
-  })
+  ipcMain.handle(IpcChannel.App_ResetData, () => backupManager.resetData())
 
   // check for update
   ipcMain.handle(IpcChannel.App_CheckForUpdate, async () => {
@@ -610,7 +603,7 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.Backup_DeleteS3File, backupManager.deleteS3File.bind(backupManager))
   ipcMain.handle(IpcChannel.Backup_CheckS3Connection, backupManager.checkS3Connection.bind(backupManager))
   ipcMain.handle(IpcChannel.Backup_CreateLanTransferBackup, backupManager.createLanTransferBackup.bind(backupManager))
-  ipcMain.handle(IpcChannel.Backup_DeleteTempBackup, backupManager.deleteTempBackup.bind(backupManager))
+  ipcMain.handle(IpcChannel.Backup_DeleteLanTransferBackup, backupManager.deleteLanTransferBackup.bind(backupManager))
 
   // file
   ipcMain.handle(IpcChannel.File_Open, fileManager.open.bind(fileManager))
@@ -822,6 +815,10 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
   ipcMain.handle(IpcChannel.Mcp_GetInstallInfo, mcpService.getInstallInfo)
   ipcMain.handle(IpcChannel.Mcp_CheckConnectivity, mcpService.checkMcpConnectivity)
   ipcMain.handle(IpcChannel.Mcp_AbortTool, mcpService.abortTool)
+  ipcMain.handle(IpcChannel.Mcp_ResolveHubTool, async (_event, nameOrId: string) => {
+    const { resolveHubToolName } = await import('@main/mcpServers/hub/mcp-bridge')
+    return resolveHubToolName(nameOrId)
+  })
   ipcMain.handle(IpcChannel.Mcp_GetServerVersion, mcpService.getServerVersion)
   ipcMain.handle(IpcChannel.Mcp_GetServerLogs, mcpService.getServerLogs)
 
@@ -1156,20 +1153,17 @@ export async function registerIpc(mainWindow: BrowserWindow, app: Electron.App) 
 
   // OpenClaw
   ipcMain.handle(IpcChannel.OpenClaw_CheckInstalled, openClawService.checkInstalled)
-  ipcMain.handle(IpcChannel.OpenClaw_CheckNodeVersion, openClawService.checkNodeVersion)
-  ipcMain.handle(IpcChannel.OpenClaw_CheckGitAvailable, checkGitAvailable)
-  ipcMain.handle(IpcChannel.OpenClaw_GetNodeDownloadUrl, openClawService.getNodeDownloadUrl)
-  ipcMain.handle(IpcChannel.OpenClaw_GetGitDownloadUrl, openClawService.getGitDownloadUrl)
   ipcMain.handle(IpcChannel.OpenClaw_Install, openClawService.install)
   ipcMain.handle(IpcChannel.OpenClaw_Uninstall, openClawService.uninstall)
   ipcMain.handle(IpcChannel.OpenClaw_StartGateway, openClawService.startGateway)
   ipcMain.handle(IpcChannel.OpenClaw_StopGateway, openClawService.stopGateway)
-  ipcMain.handle(IpcChannel.OpenClaw_RestartGateway, openClawService.restartGateway)
   ipcMain.handle(IpcChannel.OpenClaw_GetStatus, openClawService.getStatus)
   ipcMain.handle(IpcChannel.OpenClaw_CheckHealth, openClawService.checkHealth)
   ipcMain.handle(IpcChannel.OpenClaw_GetDashboardUrl, openClawService.getDashboardUrl)
   ipcMain.handle(IpcChannel.OpenClaw_SyncConfig, openClawService.syncProviderConfig)
   ipcMain.handle(IpcChannel.OpenClaw_GetChannels, openClawService.getChannelStatus)
+  ipcMain.handle(IpcChannel.OpenClaw_CheckUpdate, openClawService.checkUpdate)
+  ipcMain.handle(IpcChannel.OpenClaw_PerformUpdate, openClawService.performUpdate)
 
   // Analytics
   ipcMain.handle(IpcChannel.Analytics_TrackTokenUsage, (_, data: TokenUsageData) =>
