@@ -36,14 +36,18 @@
 
 ## 二、大模型调用总览
 
-在整个知识库和记忆流程中，共涉及 **4 次大模型调用**：
+> ⚠️ 注意：调用次数并非固定值，取决于助手配置与本轮是否触发对应流程。  
+> 文档中“#1 ~ #4”是**调用类型**，不是每次请求都必定发生的固定 4 次调用。
 
-| 序号 | 调用时机 | 用途 | 模型类型 |
-|------|----------|------|----------|
-| #1 | 意图识别阶段 | 分析用户消息，提取搜索关键词 | 主模型 (GPT-4o 等) |
-| #2 | 知识库搜索时 | 将查询文本向量化 | Embedding 模型 |
-| #3 | 记忆搜索时 | 将查询文本向量化 | Embedding 模型 |
-| #4 | 记忆存储时 | 提取事实 & 更新记忆 | 主模型 (GPT-4o 等) |
+常见调用类型如下：
+
+| 序号 | 调用时机 | 用途 | 模型类型 | 是否必定触发 |
+|------|----------|------|----------|--------------|
+| #1 | 意图识别阶段 | 分析用户消息，提取搜索关键词 | 主模型 (GPT-4o 等) | 否（仅当启用网页搜索或知识库自动识别时） |
+| #2 | 知识库搜索时 | 将查询文本向量化 | Embedding 模型 | 否 |
+| #3 | 记忆搜索时 | 将查询文本向量化 | Embedding 模型 | 否 |
+| #4a | 记忆存储时（事实提取） | 从对话中提取事实 | 主模型 (GPT-4o 等) | 否（仅当全局+助手记忆都开启） |
+| #4b | 记忆存储时（记忆更新决策） | 对比新旧记忆并生成 ADD/UPDATE/DELETE/NONE | 主模型 (GPT-4o 等) | 否（通常在 #4a 提取到事实后触发） |
 
 ---
 
@@ -60,6 +64,13 @@
 │     • webSearchProviderId? → 启用网页搜索                                   │
 │     • knowledge_bases + knowledgeRecognition === 'on' → 启用知识库搜索     │
 │     • globalMemoryEnabled + enableMemory → 启用记忆搜索                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  前置条件：                                                                  │
+│  仅当 shouldWebSearch || shouldKnowledgeSearch 为 true 才会执行意图识别     │
+│  （仅开启 memory 的场景不会执行这一步）                                      │
 └─────────────────────────────────────────────────────────────────────────────┘
         │
         ▼
@@ -290,7 +301,7 @@ AI 生成回复完成，对话结束
 │  │ "你是一个个人信息整理专家，从对话中提取关于用户的个人信息..."      │   │
 │  │                                                                      │   │
 │  │ 调用 LLM:                                                            │   │
-│  │ generateText({                                                       │   │
+│  │ fetchGenerate({                                                      │   │
 │  │   model: memoryConfig.llmModel,  // 主模型                         │   │
 │  │   prompt: systemPrompt,                                            │   │
 │  │   content: userPrompt  // 对话内容                                  │   │
@@ -322,7 +333,7 @@ AI 生成回复完成，对话结束
 │  │ "你是智能记忆管理器，对比新事实和现有记忆，决定 ADD/UPDATE/DELETE"  │   │
 │  │                                                                      │   │
 │  │ 调用 LLM:                                                            │   │
-│  │ generateText({                                                       │   │
+│  │ fetchGenerate({                                                      │   │
 │  │   model: memoryConfig.llmModel,                                     │   │
 │  │   prompt: systemPrompt,                                            │   │
 │  │   content: userPrompt  // 现有记忆 + 新事实                         │   │
@@ -346,6 +357,7 @@ AI 生成回复完成，对话结束
 │     • ADD: 存储新记忆                                                     │
 │     • UPDATE: 更新现有记忆                                               │
 │     • DELETE: 删除记忆                                                   │
+│     • NONE: 不执行操作                                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
         │
         ▼
@@ -651,11 +663,14 @@ if (parsedResult.knowledge) {
   params.tools['builtin_knowledge_search'] = knowledgeSearchTool(
     assistant,
     parsedResult.knowledge,
-    getMessageContent(userMessage),
-    topicId
+    topicId,
+    getMessageContent(userMessage)
   )
 }
 ```
+
+> 说明：`knowledgeSearchTool` 的实际签名为  
+> `knowledgeSearchTool(assistant, extractedKeywords, topicId, userMessage?)`
 
 ### 5.5 意图识别决策逻辑
 
@@ -796,7 +811,7 @@ if (parsedResult.knowledge) {
 ### 8.1 知识库
 
 ```
-Data/
+{userData}/Data/
 └── KnowledgeBase/
     └── {knowledge_base_id}.db    # LibSQL 向量数据库
 ```
@@ -804,11 +819,45 @@ Data/
 ### 8.2 记忆
 
 ```
-Data/
+{userData}/Data/
 └── Memory/
     └── memories.db               # LibSQL 数据库
 ```
 
+### 8.3 前端本地数据（Dexie / IndexedDB）
+
+> 以下为渲染进程本地结构，和主进程 `LibSQL` 数据库不是同一层：
+
+```
+IndexedDB: CherryStudio
+└── knowledge_notes               # 知识笔记等前端侧数据
+```
+
+### 8.4 与 Agents 数据库的边界
+
+`{userData}/Data/agents.db` 属于 Agents 子系统（Drizzle/SQLite），与本文的知识库/长期记忆检索链路不同，不共用同一库。
+
 ---
 
-*文档最后更新: 2026-03-02*
+## 九、流程变体与边界说明
+
+### 9.1 常见触发变体
+
+- 仅开启 memory：可能触发 #3、#4a、#4b，不触发 #1、#2  
+- 仅开启 knowledge（且 `knowledgeRecognition = on`）：可能触发 #1、#2  
+- 同时开启 web + knowledge：通常触发 #1，并按工具调用情况触发 #2  
+- 启用 memory 但检索无向量结果：主进程会降级到文本检索（LIKE）
+
+### 9.2 进程边界（简化）
+
+- Renderer：`searchOrchestrationPlugin`、`KnowledgeSearchTool`、`MemoryProcessor`
+- IPC：`window.api.knowledgeBase.*`、`window.api.memory.*`
+- Main：`KnowledgeService`、`memory/MemoryService`
+
+### 9.3 流式展示链路（工具结果到 UI）
+
+工具调用结果会在流式阶段经过 `handleToolCallChunk` 与 `toolCallbacks` 处理，再生成对应引用/工具消息块并渲染到消息列表。
+
+---
+
+*文档最后更新: 2026-03-27*

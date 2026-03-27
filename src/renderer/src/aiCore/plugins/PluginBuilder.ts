@@ -65,14 +65,15 @@ export function buildPlugins({ provider, model, config }: BuildPluginsContext): 
   // 这样反转后 extractReasoning 在外层，其 wrapStream（状态机）
   // 能处理 simulateStreaming 生成的模拟流中的未闭合 <think> 标签。
 
-  // 0.1 Reasoning extraction for OpenAI/Azure providers
+  // 0.1 用于 OpenAI/Azure 提供商的推理提取
   const providerType = provider.type
   if (providerType === 'openai' || providerType === 'azure-openai') {
     const tagName = getReasoningTagName(model.id.toLowerCase())
     plugins.push(createReasoningExtractionPlugin({ tagName }))
   }
 
-  // 0.2 Simulate streaming for non-streaming requests (must be AFTER reasoning extraction in array)
+  // 0.2 为非流式请求模拟流式传输（必须在数组中的推理提取之后）
+
   if (!config.streamOutput) {
     plugins.push(createSimulateStreamingPlugin())
   }
@@ -81,17 +82,17 @@ export function buildPlugins({ provider, model, config }: BuildPluginsContext): 
     plugins.push(createAnthropicCachePlugin(provider))
   }
 
-  // 0.3 OpenRouter reasoning redaction
+  // 0.3 OpenRouter 推理内容脱敏
   if (provider.id === SystemProviderIds.openrouter) {
     plugins.push(createOpenrouterReasoningPlugin())
   }
 
-  // 0.4 OVMS no-think for MCP tools
+  // 0.4 OVMS 为 MCP 工具禁用思考
   if (provider.id === 'ovms' && config.mcpTools && config.mcpTools.length > 0) {
     plugins.push(createNoThinkPlugin())
   }
 
-  // 0.5 Qwen thinking control for providers without enable_thinking support
+  // 0.5 Qwen 思考控制（对于不支持 enable_thinking 的提供商）
   if (
     !isOllamaProvider(provider) &&
     isSupportedThinkingTokenQwenModel(model) &&
@@ -102,17 +103,17 @@ export function buildPlugins({ provider, model, config }: BuildPluginsContext): 
     plugins.push(createQwenThinkingPlugin(enableThinking))
   }
 
-  // 0.6 OpenRouter Gemini image generation
+  // 0.6 OpenRouter Gemini 图像生成
   if (isOpenRouterGeminiGenerateImageModel(model, provider)) {
     plugins.push(createOpenrouterGenerateImagePlugin())
   }
 
-  // 0.7 Skip Gemini3 thought signature for OpenAI-compatible API
+  // 0.7 为 OpenAI 兼容 API 跳过 Gemini3 思考签名
   if (isGemini3Model(model)) {
     plugins.push(createSkipGeminiThoughtSignaturePlugin())
   }
 
-  // 1. 模型内置搜索
+  // 1. 模型内置的搜索插件
   if (config.enableWebSearch && config.webSearchPluginConfig) {
     plugins.push(webSearchPlugin(config.webSearchPluginConfig))
   }

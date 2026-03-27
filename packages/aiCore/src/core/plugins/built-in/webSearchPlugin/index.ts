@@ -20,8 +20,8 @@ export const webSearchPlugin = (config: WebSearchPluginConfig = DEFAULT_WEB_SEAR
     transformParams: async (params: any, context) => {
       let { providerId } = context
 
-      // For cherryin providers, extract the actual provider from the model's provider string
-      // Expected format: "cherryin.{actualProvider}" (e.g., "cherryin.gemini")
+      // 对于 cherryin 提供商，从 model 的 provider 字符串中提取实际提供商
+      // 预期格式："cherryin.{actualProvider}" (例如："cherryin.gemini")
       if (providerId === 'cherryin' || providerId === 'cherryin-chat') {
         const provider = params.model?.provider
         if (provider && typeof provider === 'string' && provider.includes('.')) {

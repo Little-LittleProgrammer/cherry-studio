@@ -2,9 +2,9 @@ import { definePlugin } from '@cherrystudio/ai-core'
 import { extractReasoningMiddleware } from 'ai'
 
 /**
- * Reasoning Extraction Plugin
- * Extracts reasoning/thinking tags from OpenAI/Azure responses
- * Uses AI SDK's built-in extractReasoningMiddleware
+ * 推理提取插件
+ * 从 OpenAI/Azure 响应中提取推理/思考标签
+ * 使用 AI SDK 的 built-in extractReasoningMiddleware
  */
 export const createReasoningExtractionPlugin = (options: { tagName?: string } = {}) =>
   definePlugin({

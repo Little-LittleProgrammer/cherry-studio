@@ -130,7 +130,7 @@ const applyProviderOptionsSearch = (params: any, searchOptions: any) => {
 export const switchWebSearchTool = (config: WebSearchPluginConfig, params: any, context?: AiRequestContext) => {
   const providerId = context?.providerId
 
-  // Provider-specific configuration map
+  // 提供商特定的配置映射
   const providerHandlers: Record<string, () => void> = {
     openai: () => {
       const cfg = config.openai ?? DEFAULT_WEB_SEARCH_CONFIG.openai
@@ -161,14 +161,14 @@ export const switchWebSearchTool = (config: WebSearchPluginConfig, params: any, 
     }
   }
 
-  // Try provider-specific handler first
+  // 首先尝试提供商特定的处理器
   const handler = providerId && providerHandlers[providerId]
   if (handler) {
     handler()
     return params
   }
 
-  // Fallback: apply based on available config keys (prioritized order)
+  // 回退：基于可用的配置键（优先级顺序）应用
   const fallbackOrder: Array<keyof WebSearchPluginConfig> = [
     'openai',
     'openai-chat',
