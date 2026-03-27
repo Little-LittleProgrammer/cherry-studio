@@ -174,9 +174,7 @@ export class BlockManager {
 
       // 立即更新 Redux store
       this.deps.dispatch(updateOneBlock({ id: blockId, changes }))
-      // 立即持久化到数据库
-      this.deps.saveUpdatedBlockToDB(blockId, this.deps.assistantMsgId, this.deps.topicId, this.deps.getState)
-      // 记录当前块类型，用于下一次判断
+      void this.deps.saveUpdatedBlockToDB(blockId, this.deps.assistantMsgId, this.deps.topicId, this.deps.getState)
       this._lastBlockType = blockType
     } else {
       // ---------- 节流更新分支 ----------

@@ -1030,6 +1030,18 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
   ],
   minimax: [
     {
+      id: 'MiniMax-M2.7',
+      provider: 'minimax',
+      name: 'MiniMax-M2.7',
+      group: 'M2.7'
+    },
+    {
+      id: 'MiniMax-M2.7-highspeed',
+      provider: 'minimax',
+      name: 'MiniMax-M2.7-highspeed',
+      group: 'M2.7'
+    },
+    {
       id: 'MiniMax-M2.5',
       provider: 'minimax',
       name: 'MiniMax-M2.5',
@@ -1073,6 +1085,18 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
     }
   ],
   'minimax-global': [
+    {
+      id: 'MiniMax-M2.7',
+      provider: 'minimax-global',
+      name: 'MiniMax-M2.7',
+      group: 'M2.7'
+    },
+    {
+      id: 'MiniMax-M2.7-highspeed',
+      provider: 'minimax-global',
+      name: 'MiniMax-M2.7-highspeed',
+      group: 'M2.7'
+    },
     {
       id: 'MiniMax-M2.5',
       provider: 'minimax-global',
@@ -1989,6 +2013,18 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
     {
       id: 'mimo-v2-flash',
       name: 'Mimo V2 Flash',
+      provider: 'mimo',
+      group: 'Mimo'
+    },
+    {
+      id: 'mimo-v2-pro',
+      name: 'Mimo V2 Pro',
+      provider: 'mimo',
+      group: 'Mimo'
+    },
+    {
+      id: 'mimo-v2-omni',
+      name: 'Mimo V2 Omni',
       provider: 'mimo',
       group: 'Mimo'
     }

@@ -389,6 +389,9 @@
         "TodoWrite": {
           "description": "Creează și gestionează liste de sarcini structurate"
         },
+        "ToolSearch": {
+          "description": "Descoperă instrumente amânate din biblioteci mari"
+        },
         "WebFetch": {
           "description": "Preia conținutul de la o adresă URL specificată"
         },
@@ -1192,6 +1195,8 @@
             "content": "Ești sigur că vrei să ștergi {{count}} subiecte selectate? Această acțiune nu poate fi anulată.",
             "title": "Șterge subiecte"
           },
+          "error": "Nu s-a putut șterge. Vă rugăm să încercați din nou.",
+          "partial_success": "Șters cu succes {{successCount}} subiecte, {{failedCount}} eșuate",
           "success": "S-au șters {{count}} subiecte"
         },
         "deselect_all": "Deselectează tot",
@@ -2027,6 +2032,10 @@
         "export": "Eroare la exportul Excel"
       },
       "fetchTopicName": "Nu s-a putut numi subiectul",
+      "file": {
+        "process_failed": "Fișierul {{name}} nu a putut fi procesat",
+        "text_extraction_failed": "Nu s-a putut extrage textul din {{name}}"
+      },
       "get_embedding_dimensions": "Nu s-au putut obține dimensiunile embedding",
       "invalid": {
         "api": {
@@ -2270,6 +2279,11 @@
       }
     },
     "warning": {
+      "file": {
+        "pdf_exceeds_limit": "Fișierul PDF {{name}} depășește limita de dimensiune ({{limit}}), se revine la extragerea textului",
+        "pdf_text_extraction_failed": "Nu s-a putut extrage textul din PDF {{name}}",
+        "pdf_upload_failed": "Încărcarea PDF-ului {{name}} a eșuat, se revine la extragerea textului"
+      },
       "rate": {
         "limit": "Prea multe cereri. Te rugăm să aștepți {{seconds}} secunde înainte de a încerca din nou."
       }
@@ -2603,6 +2617,27 @@
       "title": "Timp menținere conexiune"
     },
     "title": "Ollama"
+  },
+  "onboarding": {
+    "select_model": {
+      "change_later": "Poți schimba oricând asta din setări.",
+      "start": "Începe",
+      "subtitle": "Selectați modelul implicit pentru fiecare scenariu",
+      "title": "Alegeți Modelele Dvs. Implicite"
+    },
+    "skip": "Sariți",
+    "toast": {
+      "connected": "Conectat cu succes la CherryIN"
+    },
+    "welcome": {
+      "login_cherryin": "Conectare cu CherryIN",
+      "or_continue_with": "SAU CONTINUAȚI CU",
+      "other_provider": "Alegeți alți furnizori",
+      "select_other_provider": "Selectați alt furnizor",
+      "setup_hint": "Vă rugăm să configurați cel puțin un furnizor pentru cea mai bună experiență",
+      "subtitle": "Bucurați-vă de servicii AI de top cu CherryIN",
+      "title": "Bun venit la Cherry Studio"
+    }
   },
   "openclaw": {
     "checking_installation": "Verificare instalare OpenClaw...",
@@ -4812,6 +4847,7 @@
           "label": "Adaugă modele la listă"
         },
         "add_whole_group": "Adaugă întregul grup",
+        "fetch_list": "Obține lista modelelor",
         "refetch_list": "Reîmprospătează lista modelelor",
         "remove_listed": "Elimină modelele din listă",
         "remove_model": "Elimină modelul",
@@ -5632,12 +5668,8 @@
     "show_window": "Afișează fereastra"
   },
   "update": {
-    "download": "Descărcare",
     "install": "Instalează",
     "later": "Mai târziu",
-    "manualDownload": "Descărcați",
-    "manualInstallError": "Instalarea a eșuat, vă rugăm să descărcați manual de pe site-ul oficial.",
-    "manualInstallInfo": "Această versiune nu suportă actualizări automate. Faceți clic pe descărcare pentru a finaliza actualizarea.",
     "message": "Noua versiune {{version}} este gata, vrei să o instalezi acum?",
     "noReleaseNotes": "Nicio notă de lansare",
     "saveDataError": "Salvarea datelor a eșuat, te rugăm să încerci din nou.",
