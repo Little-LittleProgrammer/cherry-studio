@@ -60,7 +60,7 @@ class TextStreamAccumulator {
 
   /**
    * 添加文本流部分到累加器
-   * @param part 
+   * @param part
    */
   add(part: TextStreamPart<Record<string, any>>): void {
     switch (part.type) {
