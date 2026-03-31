@@ -37,6 +37,12 @@ const toLegacyMcpToolId = (toolId: string) => {
  * - Path validation and creation
  * - Model validation
  * - MCP tools and slash commands listing
+ *
+ * 【中文】所有 Agent 相关 Service 的抽象基类，约定：
+ * - 通过 {@link DatabaseManager} 单例拿 Drizzle 数据库实例（`getDatabase()`）。
+ * - 表里若干列存 JSON 字符串，`jsonFields` 列出字段名，`serializeJsonFields` / `deserializeJsonFields` 成对使用。
+ * - `listMcpTools`：按 Agent 类型与已绑定的 MCP 服务 id，汇总内置工具 + MCP 工具列表；并维护旧版 MCP 工具 id 映射供 `normalizeAllowedTools` 兼容历史数据。
+ * - 子类通常实现具体 CRUD 或会话逻辑，复用上述能力即可。
  */
 export abstract class BaseService {
   protected jsonFields: string[] = [

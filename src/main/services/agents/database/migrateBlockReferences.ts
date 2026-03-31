@@ -7,6 +7,9 @@
  * by ID since the deletion logic checks `message.blocks`.
  *
  * Solution: Iterate through all session_messages and add missing block IDs to message.blocks.
+ *
+ * 【中文】历史数据里「块实体在 `blocks` 数组里，但索引数组 `message.blocks` 漏了 id」会导致按 id 删除块失败。
+ * 本脚本全表扫描 `session_messages`，用纯函数（`migrateBlockReferences.utils`）合并缺失 id 后写回。
  */
 
 import { loggerService } from '@logger'

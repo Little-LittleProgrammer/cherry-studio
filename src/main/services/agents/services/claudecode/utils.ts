@@ -1,10 +1,14 @@
-// ported from https://github.com/ben-vargas/ai-sdk-provider-claude-code/blob/main/src/map-claude-code-finish-reason.ts#L22
+/**
+ * Claude Code / Anthropic 与 Vercel AI SDK 之间的映射工具：结束原因、用量字段对齐。
+ * finish reason 逻辑移植自 ai-sdk-provider-claude-code。
+ * @see https://github.com/ben-vargas/ai-sdk-provider-claude-code/blob/main/src/map-claude-code-finish-reason.ts#L22
+ */
 import type { JSONObject } from '@ai-sdk/provider'
 import type { BetaStopReason } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { FinishReason, LanguageModelUsage } from 'ai'
 
 /**
- * Maps Claude Code SDK result subtypes to AI SDK finish reasons.
+ * 将 Claude Code SDK `result` 子类型映射为 AI SDK 的 `FinishReason`。
  *
  * @param subtype - The result subtype from Claude Code SDK
  * @returns The corresponding AI SDK finish reason with unified and raw values
@@ -26,15 +30,12 @@ export function mapClaudeCodeFinishReason(subtype?: string): FinishReason {
     case undefined:
       return 'stop'
     default:
-      // Unknown subtypes mapped to 'other' to distinguish from genuine completion
+      // 未知子类型归为 other，与正常 stop 区分
       return 'other'
   }
 }
 
-/**
- * Maps Anthropic stop reasons to the AiSDK equivalents so higher level
- * consumers can treat completion states uniformly across providers.
- */
+/** Anthropic `stop_reason` → AI SDK `FinishReason`，供多提供商统一处理 */
 const finishReasonMapping: Record<BetaStopReason, FinishReason> = {
   end_turn: 'stop',
   max_tokens: 'length',
@@ -45,17 +46,10 @@ const finishReasonMapping: Record<BetaStopReason, FinishReason> = {
 }
 
 /**
- * Maps Claude Code SDK result subtypes to AI SDK finish reasons.
+ * 将流式消息中的 Anthropic `stop_reason` 转为 AI SDK `FinishReason`。
  *
- * @param subtype - The result subtype from Claude Code SDK
- * @returns The corresponding AI SDK finish reason with unified and raw values
- *
- * @example
- * ```typescript
- * const finishReason = mapClaudeCodeFinishReason('error_max_turns');
- * // Returns: 'length'
- * ```
- **/
+ * @param claudeStopReason - Anthropic Beta API 的 stop_reason，可为 null
+ */
 export function mapClaudeCodeStopReason(claudeStopReason: BetaStopReason | null): FinishReason {
   if (claudeStopReason === null) {
     return 'stop'
@@ -71,14 +65,7 @@ type ClaudeCodeUsage = {
 }
 
 /**
- * Converts Claude Code SDK usage to AI SDK v6 stable usage format.
- *
- * Maps Claude's flat token counts to the nested structure required by AI SDK v6:
- * - `cache_creation_input_tokens` → `inputTokens.cacheWrite`
- * - `cache_read_input_tokens` → `inputTokens.cacheRead`
- * - `input_tokens` → `inputTokens.noCache`
- * - `inputTokens.total` = sum of all input tokens
- * - `output_tokens` → `outputTokens.total`
+ * 将 Claude Code SDK 扁平用量字段转为 AI SDK 稳定版 `LanguageModelUsage`（含 cache 细分）。
  *
  * @param usage - Raw usage data from Claude Code SDK
  * @returns Formatted usage object for AI SDK v6

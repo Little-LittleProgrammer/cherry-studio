@@ -1,5 +1,8 @@
 /**
  * Drizzle ORM schema for sessions and session_logs tables
+ *
+ * 【中文】`sessions` 表：隶属于某个 Agent（`agent_id` 外键级联删除）的一次 **对话会话**。
+ * 可覆盖 Agent 默认的模型/路径/MCP/工具白名单；`slash_commands` 存 SDK 初始化返回的斜杠命令快照。
  */
 
 import { foreignKey, index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'

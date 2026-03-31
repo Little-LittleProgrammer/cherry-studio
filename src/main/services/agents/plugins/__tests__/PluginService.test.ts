@@ -4,10 +4,10 @@ import { type ResolvedSkill } from '@types'
 import { describe, expect, it } from 'vitest'
 
 /**
+ * 与 {@link PluginService} 中部分私有逻辑对齐的测试镜像函数，便于单独做单测。
+ * 若主实现变更，请同步更新此处，避免测试与生产代码漂移。
+ *
  * Test helper functions extracted from PluginService for testing.
- * These mirror the private method implementations in PluginService for isolated unit testing,
- * following the same pattern used for extractBaseRepoUrl and extractResolvedSkill above.
- * When modifying PluginService private methods, update the corresponding mirrors here.
  */
 
 // extractBaseRepoUrl implementation

@@ -1,3 +1,7 @@
+/**
+ * 【中文】`session_messages`：会话内的 **消息流水**（用户 / 助手 / 工具等），`content` 为结构化 JSON（含 blocks 等），
+ * `agent_session_id` 用于对接 Claude Code 等运行时的外部会话 id；删会话时由外键级联清空消息。
+ */
 import { foreignKey, index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 
 import { sessionsTable } from './sessions.schema'

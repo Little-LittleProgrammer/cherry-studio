@@ -42,20 +42,31 @@ import { AgentService } from '../services/AgentService'
 import { PluginCacheStore } from './PluginCacheStore'
 import { PluginInstaller } from './PluginInstaller'
 
+/**
+ * Agent 插件主服务（单例）：安装来源包括 **市场**（`marketplace:plugin|skill:...`）、**ZIP 上传**、**本地目录**。
+ *
+ * 磁盘布局（相对代理 `workdir`）：
+ * - `.claude/agents`、`commands`：单文件 Markdown 插件
+ * - `.claude/skills/<文件夹>`：技能（含 SKILL.md）
+ * - `.claude/plugins/<包名>`：带 `.claude-plugin/plugin.json` 的插件包（可含多组件）
+ * - `.claude/plugins.json`：已安装列表缓存，由 {@link PluginCacheStore} 维护
+ *
+ * 与 {@link AgentService} 协同：安装/卸载后更新 agent 内存中的 `installed_plugins`，并做路径穿越、
+ * 文件名长度、ZIP 炸弹（总大小/文件数）等校验。
+ */
 const logger = loggerService.withContext('PluginService')
 
 /**
- * Claude Plugins Registry API base URL.
+ * Claude 插件市场 Registry API 根地址（解析 Git 地址、技能 v2 resolve、安装统计等）。
  *
- * This API provides plugin/skill discovery and installation tracking for the
- * Claude plugins ecosystem. The API endpoints used are:
- * - GET  /api/resolve/{owner}/{marketplace}/{plugin} - Resolve plugin git URL and metadata
- * - GET  /api/skills/{owner}/{repo}/{skillName}      - Get skill metadata and source URL
- * - POST /api/skills/{owner}/{repo}/{skillName}/install - Track skill installation
+ * Endpoints:
+ * - GET  /api/resolve/{owner}/{marketplace}/{plugin}
+ * - GET  /api/skills/{owner}/{repo}/{skillName}
+ * - POST /api/skills/{owner}/{repo}/{skillName}/install
  *
  * @see https://www.val.town/x/kamalnrf/claude-plugins-registry/code/API.md
  *
- * TODO: Verify accessibility from China mainland - may need proxy or alternative endpoint
+ * TODO: 中国大陆可达性待验证，必要时需代理或备用端点
  */
 const MARKETPLACE_API_BASE_URL = 'https://api.claude-plugins.dev'
 const MARKETPLACE_SOURCE_PREFIX = 'marketplace:'
@@ -64,7 +75,7 @@ interface PluginServiceConfig {
   maxFileSize: number // bytes
 }
 
-// Install context for component installation
+/** 一次安装流程里共用的 agent 与代理工作目录 */
 interface InstallContext {
   agent: GetAgentResponse
   workdir: string
@@ -77,34 +88,29 @@ interface MarketplaceIdentifier {
   name: string
 }
 
-// Result of creating installed plugin metadata
+/** `createInstalledPluginMetadata` 的返回值：元数据 + 写入缓存用的 InstalledPlugin */
 interface ComponentInstallResult {
   metadata: PluginMetadata
   installedPlugin: InstalledPlugin
 }
 
 /**
- * PluginService manages agent and command plugins from resources directory.
- *
- * Features:
- * - Singleton pattern for consistent state management
- * - Caching of available plugins for performance
- * - Security validation (path traversal, file size, extensions)
- * - Transactional install/uninstall operations
- * - Integration with AgentService for metadata persistence
+ * 见文件顶部模块说明。对外主要能力：市场安装、ZIP/目录安装、卸载、列已装、编辑插件内容、
+ * 供 Claude Code SDK 使用的本地插件包路径列表。
  */
 export class PluginService {
   private static instance: PluginService | null = null
 
-  // Plugin type to directory name mapping
+  /** agent/command/skill → `.claude` 下子目录名 */
   private static readonly PLUGIN_TYPE_DIRECTORIES: Record<PluginType, 'agents' | 'commands' | 'skills'> = {
     agent: 'agents',
     command: 'commands',
     skill: 'skills'
   }
 
-  // ZIP extraction limits (protection against zip bombs)
+  /** ZIP 解压：总解压大小上限（防 zip bomb） */
   private readonly MAX_EXTRACTED_SIZE = 100 * 1024 * 1024 // 100MB
+  /** ZIP 内允许的最大文件条数 */
   private readonly MAX_FILES_COUNT = 1000
 
   private config: PluginServiceConfig
@@ -112,8 +118,7 @@ export class PluginService {
   private readonly installer: PluginInstaller
   private readonly agentService: AgentService
 
-  // Max folder/file name length to prevent Windows MAX_PATH (260 chars) issues.
-  // Applied cross-platform for consistency with cloud-synced workdirs.
+  /** 文件夹/文件名最大长度，减轻 Windows MAX_PATH 与网盘同步路径问题（全平台统一限制） */
   private static readonly MAX_NAME_LENGTH = 80
 
   private readonly ALLOWED_EXTENSIONS = ['.md', '.markdown']
@@ -136,9 +141,7 @@ export class PluginService {
     })
   }
 
-  /**
-   * Get singleton instance
-   */
+  /** 全局单例；测试可传 config 覆盖默认（仅首次构造生效） */
   static getInstance(config?: Partial<PluginServiceConfig>): PluginService {
     if (!PluginService.instance) {
       PluginService.instance = new PluginService(config)
@@ -146,8 +149,12 @@ export class PluginService {
     return PluginService.instance
   }
 
+  // --------------------------------------------------------------------------
+  // 市场安装入口：`sourcePath` 为 `marketplace:plugin:...` 或 `marketplace:skill:...`
+  // --------------------------------------------------------------------------
+
   /**
-   * Install plugin with validation and transactional safety
+   * 安装插件/技能（当前仅支持市场源）。本地预设路径已禁用，请用市场或 ZIP/目录安装 API。
    */
   async install(options: InstallPluginOptions): Promise<PluginMetadata> {
     logger.info('Installing plugin', options)
@@ -164,6 +171,8 @@ export class PluginService {
       path: options.sourcePath
     } as PluginError
   }
+
+  // ---------- 市场内部：解析标识、resolve API、git clone、装入 workdir ----------
 
   private isMarketplaceSource(sourcePath: string): boolean {
     return sourcePath.startsWith(MARKETPLACE_SOURCE_PREFIX)
@@ -377,9 +386,7 @@ export class PluginService {
     return response.json()
   }
 
-  /**
-   * Extract repository URL from plugin resolve API response using Zod schema
-   */
+  /** 从市场 resolve 响应中取出 Git URL（多字段别名兼容，Zod 校验） */
   private extractRepositoryUrl(payload: unknown): string | null {
     if (typeof payload === 'string') return payload
 
@@ -391,10 +398,7 @@ export class PluginService {
     return resolvedUrl && resolvedUrl.length > 0 ? resolvedUrl : null
   }
 
-  /**
-   * Resolve skill using the v2 API endpoint
-   * POST /api/v2/skills/resolve with body { target, limit, offset }
-   */
+  /** POST `/api/v2/skills/resolve`，body `{ target, limit, offset }`，返回技能列表 */
   private async resolveSkillV2(url: string, target: string): Promise<ResolvedSkill[]> {
     const response = await fetch(url, {
       method: 'POST',
@@ -432,27 +436,21 @@ export class PluginService {
     return result.data.skills
   }
 
-  /**
-   * Extract the resolved skill from the v2 API response
-   */
+  /** 按名称（忽略大小写）匹配；否则退回列表首项 */
   private extractResolvedSkill(skills: ResolvedSkill[], skillName: string): ResolvedSkill | null {
     if (!skills || skills.length === 0) return null
 
-    // Find the skill by name (case-insensitive)
     const skill = skills.find((s) => s.name.toLowerCase() === skillName.toLowerCase())
     return skill ?? skills[0] ?? null
   }
 
-  /**
-   * Extract base repository URL from a GitHub tree URL
-   * e.g., https://github.com/owner/repo/tree/main/path -> https://github.com/owner/repo
-   */
+  /** 将 GitHub tree/blob 链接裁成仓库根 URL，供 `git clone` 使用 */
   private extractBaseRepoUrl(url: string): string {
-    // Match GitHub tree/blob URLs: https://github.com/owner/repo/{tree|blob}/branch/path
     const match = url.match(/^(https:\/\/github\.com\/[^/]+\/[^/]+)\/(?:tree|blob)\//)
     return match?.[1] ?? url
   }
 
+  /** 在 clone 后的仓库根目录中定位技能文件夹（manifest 相对路径或启发式搜索） */
   private async resolveSkillDirectory(
     repoDir: string,
     skillName: string,
@@ -527,23 +525,10 @@ export class PluginService {
   }
 
   /**
-   * Report skill installation to the marketplace for usage analytics.
-   *
-   * This is a fire-and-forget telemetry call that increments the install count
-   * for a skill in the marketplace. The request is made asynchronously and
-   * failures are silently logged without affecting the installation flow.
-   *
-   * API: POST /api/skills/{owner}/{repo}/{skillName}/install
-   * - No request body required
-   * - Returns install metrics (total, weekly, monthly counts)
-   * - Auto-indexes unknown skills from GitHub
-   * - Used for popularity tracking and download statistics
-   *
-   * Note: This telemetry is sent automatically when installing skills from the
-   * marketplace. No personally identifiable information is transmitted.
+   * 向市场回报技能安装次数（异步、失败只打日志，不影响本地安装结果）。
+   * POST /api/skills/{owner}/{repo}/{skillName}/install
    *
    * @see https://www.val.town/x/kamalnrf/claude-plugins-registry/code/API.md
-   * @param identifier - The marketplace skill identifier
    */
   private async reportSkillInstall(identifier: MarketplaceIdentifier): Promise<void> {
     if (identifier.kind !== 'skill') return
@@ -551,8 +536,12 @@ export class PluginService {
     await net.fetch(url, { method: 'POST' })
   }
 
+  // --------------------------------------------------------------------------
+  // 卸载：单组件（文件或技能目录）或整包（按 packageName 批量删）
+  // --------------------------------------------------------------------------
+
   /**
-   * Uninstall plugin with cleanup
+   * 卸载单个已安装项：删磁盘文件/目录 + 更新 plugins.json + agent.installed_plugins
    */
   async uninstall(options: UninstallPluginOptions): Promise<void> {
     logger.info('Uninstalling plugin', options)
@@ -578,7 +567,7 @@ export class PluginService {
   }
 
   /**
-   * Uninstall entire plugin package and all its components
+   * 按 `packageName` 卸载插件包内所有已登记组件（缓存中 metadata.packageName 相同者）
    */
   async uninstallPluginPackage(options: UninstallPluginPackageOptions): Promise<UninstallPluginPackageResult> {
     const { agentId, packageName } = options
@@ -649,9 +638,7 @@ export class PluginService {
     }
   }
 
-  /**
-   * Internal method to uninstall a single component
-   */
+  /** 卸载单个 skill 目录或 agent/command 单文件，并同步缓存与 agent 列表 */
   private async uninstallComponentInternal(
     workdir: string,
     agent: GetAgentResponse,
@@ -674,8 +661,12 @@ export class PluginService {
     }
   }
 
+  // --------------------------------------------------------------------------
+  // 查询：已装列表、Claude Code SDK 所需的插件包根路径
+  // --------------------------------------------------------------------------
+
   /**
-   * List installed plugins for an agent (from database + filesystem validation)
+   * 列出某 agent 工作区内已安装插件（读 `.claude/plugins.json`，依赖 cacheStore）
    */
   async listInstalled(agentId: string): Promise<InstalledPlugin[]> {
     logger.debug('Listing installed plugins', { agentId })
@@ -700,7 +691,7 @@ export class PluginService {
   }
 
   /**
-   * List installed plugin package paths for Claude Code SDK (local plugins)
+   * 为 Claude Agent SDK 收集 `type: 'local'` 插件目录：`.claude/plugins/<包名>` 且含有效 plugin.json
    */
   async listInstalledPluginPackagePaths(agentId: string): Promise<string[]> {
     logger.debug('Listing installed plugin package paths', { agentId })
@@ -743,6 +734,7 @@ export class PluginService {
     return pluginPaths
   }
 
+  /** 清理临时目录（市场 clone、ZIP 解压等），错误只记日志 */
   private async safeRemoveDirectory(dirPath: string): Promise<void> {
     try {
       await deleteDirectoryRecursive(dirPath)
@@ -754,6 +746,10 @@ export class PluginService {
       })
     }
   }
+
+  // --------------------------------------------------------------------------
+  // ZIP 上传：校验扩展名与存在性；解压带总大小/文件数上限
+  // --------------------------------------------------------------------------
 
   private async validateZipFile(zipFilePath: string): Promise<void> {
     try {
@@ -817,9 +813,7 @@ export class PluginService {
   }
 
   /**
-   * Install plugin package from ZIP file
-   * Supports complete plugin packages with .claude-plugin/plugin.json
-   * Supports multiple plugin packages in a single ZIP
+   * 从 ZIP 安装：先解压到临时目录，再走与目录安装相同的 `installFromSourceDir` 逻辑（支持多包、marketplace.json）
    */
   async installFromZip(options: InstallFromZipOptions): Promise<InstallFromSourceResult> {
     const { agentId, zipFilePath } = options
@@ -842,9 +836,7 @@ export class PluginService {
   }
 
   /**
-   * Install plugin package from directory
-   * Supports complete plugin packages with .claude-plugin/plugin.json
-   * Supports multiple plugin packages in a single directory
+   * 从用户选中的本地目录安装（校验可读、存在），逻辑同 ZIP 解压后的目录
    */
   async installFromDirectory(options: InstallFromDirectoryOptions): Promise<InstallFromSourceResult> {
     const { agentId, directoryPath } = options
@@ -868,9 +860,12 @@ export class PluginService {
     return await this.installFromSourceDir(directoryPath, workdir, agent, agentId, 'directory')
   }
 
+  // --------------------------------------------------------------------------
+  // 源目录安装管道：优先识别 plugin.json 包根，否则按 SKILL.md 技能目录处理
+  // --------------------------------------------------------------------------
+
   /**
-   * Install plugin packages from a source directory (shared logic for ZIP and directory install)
-   * Supports both plugin packages (with .claude-plugin/plugin.json) and skills (with SKILL.md)
+   * ZIP 与「目录安装」共用的核心：先 `findPluginRoots`，若无则 `findAllSkillDirectories`
    */
   private async installFromSourceDir(
     sourceDir: string,
@@ -921,9 +916,7 @@ export class PluginService {
     throw { type: 'PLUGIN_MANIFEST_NOT_FOUND', path: sourceDir } as PluginError
   }
 
-  /**
-   * Install multiple skill directories and collect results
-   */
+  /** 批量安装技能目录，单项失败记入 failed 不中断其它项 */
   private async installSkillRoots(
     skillDirs: Array<{ folderPath: string; sourcePath: string }>,
     workdir: string,
@@ -949,9 +942,7 @@ export class PluginService {
     return packages
   }
 
-  /**
-   * Install a single skill from a directory containing SKILL.md
-   */
+  /** 将含 SKILL.md 的目录复制到 `.claude/skills/<名>` 并登记缓存 */
   private async installSkillFromDirectory(
     skillDir: string,
     workdir: string,
@@ -982,9 +973,7 @@ export class PluginService {
     return metadataWithInstall
   }
 
-  /**
-   * Install multiple plugin roots and collect results
-   */
+  /** 对每个插件根调用 `installSinglePlugin`，聚合成功/失败 */
   private async installPluginRoots(
     pluginRoots: string[],
     workdir: string,
@@ -1007,7 +996,7 @@ export class PluginService {
   }
 
   /**
-   * Install a single plugin package from a plugin root directory
+   * 安装单个插件包：读 manifest → 复制到 `.claude/plugins/<名>` → 扫描 skills/agents/commands 并 register
    */
   private async installSinglePlugin(
     pluginRoot: string,
@@ -1060,8 +1049,12 @@ export class PluginService {
     }
   }
 
+  // --------------------------------------------------------------------------
+  // 插件包结构：manifest、目录复制、查找多包根、marketplace.json 聚合
+  // --------------------------------------------------------------------------
+
   /**
-   * Read and validate plugin manifest from .claude-plugin/plugin.json
+   * 读取并校验 `.claude-plugin/plugin.json`
    */
   private async readPluginManifest(dir: string): Promise<PluginManifest> {
     const manifestPath = path.join(dir, '.claude-plugin', 'plugin.json')
@@ -1095,7 +1088,7 @@ export class PluginService {
   }
 
   /**
-   * Copy plugin directory with symlink dereferencing
+   * 整包复制到 `.claude/plugins/<name>`：`dereference: true` 符合 Claude Code 文档对符号链接的要求
    */
   private async copyPluginDirectory(src: string, dest: string): Promise<void> {
     // Ensure parent directory exists
@@ -1117,20 +1110,12 @@ export class PluginService {
     logger.debug('Plugin directory copied', { src, dest })
   }
 
-  /**
-   * Maximum recursion depth for findPluginRoots to prevent infinite loops
-   * from symlink cycles or deeply nested directories
-   */
+  /** `findPluginRoots` 最大递归深度，防止符号链接环或极深目录 */
   private static readonly MAX_PLUGIN_ROOT_DEPTH = 10
 
   /**
-   * Find all plugin root directories.
-   * Supports: single plugin, single plugin with wrapper directory, multiple plugins, marketplace.
-   * e.g., if ZIP extracts to: tempDir/plugin-name/.claude-plugin/plugin.json
-   * this method returns: [tempDir/plugin-name]
-   * e.g., if ZIP extracts to: tempDir/plugins/{plugin1, plugin2}/.claude-plugin/...
-   * this method returns: [tempDir/plugins/plugin1, tempDir/plugins/plugin2]
-   * e.g., if directory has .claude-plugin/marketplace.json, resolve plugin sources from it
+   * 在解压/源目录下找出所有「插件根」（含 `.claude-plugin/plugin.json`）。
+   * 支持：单包、外包一层目录、多包并列、以及 `marketplace.json` 声明的聚合市场。
    */
   private async findPluginRoots(extractedDir: string, depth = 0): Promise<string[]> {
     // Prevent infinite recursion from symlink cycles or deeply nested directories
@@ -1192,9 +1177,7 @@ export class PluginService {
     return []
   }
 
-  /**
-   * Resolve plugin roots from marketplace manifest
-   */
+  /** 根据 `marketplace.json` 里每条 plugin 的 source 解析出磁盘上的插件根路径 */
   private async resolveMarketplacePluginRoots(
     marketplaceDir: string,
     marketplace: MarketplaceManifest
@@ -1234,16 +1217,11 @@ export class PluginService {
     return roots
   }
 
-  /**
-   * Check if directory contains .claude-plugin/plugin.json
-   */
   private async hasPluginJson(dir: string): Promise<boolean> {
     return fileExists(path.join(dir, '.claude-plugin', 'plugin.json'))
   }
 
-  /**
-   * Read and validate marketplace manifest from .claude-plugin/marketplace.json
-   */
+  /** 读取 `.claude-plugin/marketplace.json`（聚合多插件源） */
   private async readMarketplaceManifest(dir: string): Promise<MarketplaceManifest | null> {
     const manifestPath = path.join(dir, '.claude-plugin', 'marketplace.json')
 
@@ -1267,8 +1245,7 @@ export class PluginService {
   }
 
   /**
-   * Resolve plugin source path from marketplace entry
-   * Supports: relative paths, github: prefix, git: prefix
+   * 将 marketplace 条目中的 source 转为绝对路径或 `github:` / `git:` / `npm:` 前缀字符串
    */
   private resolveMarketplacePluginSource(
     marketplaceDir: string,
@@ -1292,9 +1269,7 @@ export class PluginService {
     throw new Error(`Invalid plugin source: ${JSON.stringify(source)}`)
   }
 
-  /**
-   * Scan default directory + custom paths for components
-   */
+  /** 扫描 manifest 指定的默认子目录与自定义路径（防穿越） */
   private async scanComponentPaths(
     pluginDir: string,
     defaultSubDir: string,
@@ -1348,9 +1323,7 @@ export class PluginService {
     return results
   }
 
-  /**
-   * Scan a directory and register all valid components
-   */
+  /** 枚举目录项：技能子目录需含 skill md；agent/command 为合法扩展名的单文件 */
   private async scanAndRegisterComponents(
     dirPath: string,
     type: PluginType,
@@ -1406,9 +1379,7 @@ export class PluginService {
     return results
   }
 
-  /**
-   * Register a component (skill/agent/command) and update cache
-   */
+  /** 安装单个组件：解析元数据、落盘、upsert 缓存与 agent 列表 */
   private async registerComponent(
     componentPath: string,
     name: string,
@@ -1444,17 +1415,11 @@ export class PluginService {
   }
 
   // ============================================================================
-  // Cache File Management (for installed plugins)
+  // 缓存与在线编辑：plugins.json + 仅支持 agent/command 单文件写回
   // ============================================================================
 
   /**
-   * Read cache file from .claude/plugins.json
-   * Returns null if cache doesn't exist or is invalid
-   */
-
-  /**
-   * List installed plugins from cache file
-   * Falls back to filesystem scan if cache is missing or corrupt
+   * 从缓存列出已安装项；内部由 {@link PluginCacheStore} 在缺失时自动 rebuild
    */
   async listInstalledFromCache(workdir: string): Promise<InstalledPlugin[]> {
     logger.debug('Listing installed plugins from cache', { workdir })
@@ -1462,8 +1427,7 @@ export class PluginService {
   }
 
   /**
-   * Write plugin content to installed plugin (in agent's .claude directory)
-   * Note: Only works for file-based plugins (agents/commands), not skills
+   * 覆盖已安装的单文件插件内容（agents/commands），更新 hash 与缓存；不支持 skill 目录
    */
   async writeContent(agentId: string, filename: string, type: PluginType, content: string): Promise<void> {
     logger.info('Writing plugin content', { agentId, filename, type })
@@ -1525,39 +1489,30 @@ export class PluginService {
   }
 
   // ============================================================================
-  // Private Helper Methods
+  // 路径、agent 校验、元数据组装、文件名消毒
   // ============================================================================
 
-  /**
-   * Resolve plugin type to directory name under .claude
-   */
+  /** `.claude` 下类型子目录名 */
   private getPluginDirectoryName(type: PluginType): 'agents' | 'commands' | 'skills' {
     return PluginService.PLUGIN_TYPE_DIRECTORIES[type]
   }
 
-  /**
-   * Get the base .claude directory for a workdir
-   */
   private getClaudeBasePath(workdir: string): string {
     return path.join(workdir, '.claude')
   }
 
-  /**
-   * Get the directory for a specific plugin type inside .claude
-   */
   private getClaudePluginDirectory(workdir: string, type: PluginType): string {
     return path.join(this.getClaudeBasePath(workdir), this.getPluginDirectoryName(type))
   }
 
-  /**
-   * Get the absolute path for a plugin file/folder inside .claude
-   */
   private getClaudePluginPath(workdir: string, type: PluginType, filename: string): string {
     return path.join(this.getClaudePluginDirectory(workdir, type), filename)
   }
 
   /**
-   * Validate source path to prevent path traversal attacks
+   * 获取 agent 对象，如果 agent 不存在，则抛出错误
+   * @param agentId
+   * @returns
    */
   private async getAgentOrThrow(agentId: string): Promise<GetAgentResponse> {
     const agent = await this.agentService.getAgent(agentId)
@@ -1585,9 +1540,7 @@ export class PluginService {
     return workdir
   }
 
-  /**
-   * Validate workdir against agent's accessible paths
-   */
+  /** 校验 workdir 属于 agent.accessible_paths 且可读写 */
   private async validateWorkdir(agent: GetAgentResponse, workdir: string): Promise<void> {
     // Verify workdir is in agent's accessible_paths
     if (!agent.accessible_paths?.includes(workdir)) {
@@ -1611,9 +1564,7 @@ export class PluginService {
     }
   }
 
-  /**
-   * Create metadata and InstalledPlugin objects for a component
-   */
+  /** 组装带 installedAt 的元数据与 {@link InstalledPlugin} 行对象 */
   private createInstalledPluginMetadata(
     metadata: PluginMetadata,
     filename: string,
@@ -1640,9 +1591,7 @@ export class PluginService {
     return { metadata: metadataWithInstall, installedPlugin }
   }
 
-  /**
-   * Register plugin in both cache store and agent's installed_plugins
-   */
+  /** 双写：磁盘 plugins.json + 内存 agent.installed_plugins */
   private async registerPluginInCache(
     workdir: string,
     installedPlugin: InstalledPlugin,
@@ -1666,9 +1615,7 @@ export class PluginService {
     agent.installed_plugins = agent.installed_plugins.filter((p) => !(p.filename === filename && p.type === type))
   }
 
-  /**
-   * Sanitize filename to remove unsafe characters (for agents/commands)
-   */
+  /** agent/command 文件名：去路径分隔符与非法字符，保证 .md 扩展，截断过长主名 */
   private sanitizeFilename(filename: string): string {
     // Remove path separators
     let sanitized = filename.replace(/[/\\]/g, '_')
@@ -1691,10 +1638,7 @@ export class PluginService {
     return sanitized
   }
 
-  /**
-   * Sanitize folder name for skills (different rules than file names)
-   * NO dots allowed to avoid confusion with file extensions
-   */
+  /** 技能文件夹名：不允许点号，避免与扩展名混淆；其它规则同安全字符集 */
   private sanitizeFolderName(folderName: string): string {
     // Remove path separators
     let sanitized = folderName.replace(/[/\\]/g, '_')
@@ -1718,10 +1662,7 @@ export class PluginService {
     return sanitized
   }
 
-  /**
-   * Truncate a name to maxLength, appending a hash suffix for uniqueness.
-   * Names within the limit are returned unchanged.
-   */
+  /** 超长名称截断并追加短 hash，避免碰撞 */
   private truncateWithHash(name: string, maxLength: number): string {
     if (name.length <= maxLength) return name
     if (maxLength <= 9) return name.slice(0, maxLength)
@@ -1730,9 +1671,6 @@ export class PluginService {
     return `${truncated}-${hash}`
   }
 
-  /**
-   * Ensure .claude subdirectory exists for the given plugin type
-   */
   private async ensureClaudeDirectory(workdir: string, type: PluginType): Promise<void> {
     const typeDir = this.getClaudePluginDirectory(workdir, type)
 
@@ -1752,4 +1690,5 @@ export class PluginService {
   }
 }
 
+/** 主进程各模块默认使用的插件服务单例 */
 export const pluginService = PluginService.getInstance()

@@ -1,6 +1,9 @@
+/**
+ * Claude Code 内置工具清单（元数据）：与官方文档一致，用于权限说明与 UI 展示。
+ * @see https://docs.anthropic.com/en/docs/claude-code/settings#tools-available-to-claude
+ */
 import type { Tool } from '@types'
 
-// https://docs.anthropic.com/en/docs/claude-code/settings#tools-available-to-claude
 export const builtinTools: Tool[] = [
   {
     id: 'Bash',

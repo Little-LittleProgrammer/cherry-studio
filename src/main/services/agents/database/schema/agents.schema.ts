@@ -1,5 +1,8 @@
 /**
  * Drizzle ORM schema for agents table
+ *
+ * 【中文】`agents` 表：一条记录对应侧边栏里的一个 **Agent 配置**（类型、名称、主/备模型、指令、工作区路径、MCP 与工具白名单等）。
+ * 多数字段以 JSON 字符串存储，读写时由 `BaseService` 序列化；`sort_order` 控制列表展示顺序。
  */
 
 import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'

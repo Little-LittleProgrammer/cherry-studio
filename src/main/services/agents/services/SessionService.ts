@@ -1,3 +1,11 @@
+/**
+ * 【中文 · 会话服务】
+ *
+ * 「会话」隶属于某个 Agent：存在 `sessions` 表中，含标题、模型覆盖字段、与 Claude Code 恢复会话相关的元数据等。
+ * - **createSession / updateSession**：写库前会按需校验模型；更新时可整对象替换或合并补丁。
+ * - **listSlashCommands**：在基类能力之上合并 **内置斜杠命令**（`commands.ts`）与 **本地 command 插件**（`.claude/commands/`），供 UI 展示与发送前补全。
+ * 与 {@link SessionMessageService} 配合：先有会话，再在会话下收发消息。
+ */
 import { loggerService } from '@logger'
 import type { SlashCommand, UpdateSessionResponse } from '@types'
 import {

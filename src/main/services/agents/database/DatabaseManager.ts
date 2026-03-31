@@ -48,6 +48,10 @@ enum InitState {
  * - Safe connection cleanup
  * - Error recovery and retry logic
  * - Windows platform compatibility fixes
+ *
+ * 【中文】主进程内 **唯一** 持有 `agents.db` 连接的地方（`getInstance()` 时初始化）。
+ * 启动顺序要点：必要时把旧版 `{userData}/agents.db` 迁到 `{userData}/Data/agents.db` → 建目录与 LibSQL client →
+ * 跑 Drizzle SQL 迁移 → 再跑 {@link DataMigrationService} 中的数据修复任务。应用退出前应 `close()` 释放连接。
  */
 export class DatabaseManager {
   private static instance: DatabaseManager | null = null

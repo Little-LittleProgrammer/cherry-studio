@@ -1,22 +1,16 @@
 /**
- * Lightweight state container shared by the Claude → AiSDK transformer. Anthropic does not send
- * deterministic identifiers for intermediate content blocks, so we stitch one together by tracking
- * block indices and associated AiSDK ids. This class also keeps:
- *   • incremental text / reasoning buffers so we can emit only deltas while retaining the full
- *     aggregate for later tool-call emission;
- *   • a reverse lookup for tool calls so `tool_result` snapshots can recover their metadata;
- *   • pending usage + finish reason from `message_delta` events until the corresponding
- *     `message_stop` arrives.
- * Every Claude turn gets its own instance. `resetStep` should be invoked once the finish event has
- * been emitted to avoid leaking state into the next turn.
+ * Claude → AiSDK 转换器共用的轻量状态机。
+ *
+ * Anthropic 中间内容块往往没有稳定 id，因此用「块索引 + 自生成 id」拼接；
+ * 同时维护：文本/推理增量缓冲、`tool_result` 与先前 `tool_use` 的反向关联、
+ * `message_delta` 到 `message_stop` 之间暂存的用量与结束原因。
+ * 每个 Claude 轮次应使用独立实例，发出 finish 后须调用 `resetStep`，避免泄漏到下一轮。
  */
 import { loggerService } from '@logger'
 import type { FinishReason, LanguageModelUsage, ProviderMetadata } from 'ai'
 
 /**
- * Builds a namespaced tool call ID by combining session ID with raw tool call ID.
- * This ensures tool calls from different sessions don't conflict even if they have
- * the same raw ID from the SDK.
+ * 用会话 ID 前缀拼接 SDK 原始 tool id，避免多会话下 raw id 撞车。
  *
  * @param sessionId - The agent session ID
  * @param rawToolCallId - The raw tool call ID from SDK (e.g., "WebFetch_0")
@@ -25,9 +19,7 @@ export function buildNamespacedToolCallId(sessionId: string, rawToolCallId: stri
   return `${sessionId}:${rawToolCallId}`
 }
 
-/**
- * Shared fields for every block that Claude can stream (text, reasoning, tool).
- */
+/** Claude 可流式输出的块：文本 / 推理 / 工具 的公共字段 */
 type BaseBlockState = {
   id: string
   index: number
@@ -73,10 +65,8 @@ type ClaudeStreamStateOptions = {
 }
 
 /**
- * Tracks the lifecycle of Claude streaming blocks (text, thinking, tool calls)
- * across individual websocket events. The transformer relies on this class to
- * stitch together deltas, manage pending tool inputs/results, and propagate
- * usage/finish metadata once Anthropic closes a message.
+ * 跟踪单次 assistant 消息内各 content block 的生命周期：
+ * 拼接 delta、挂起/消费工具调用、在 message_stop 时带上 pending 用量。
  */
 export class ClaudeStreamState {
   private logger

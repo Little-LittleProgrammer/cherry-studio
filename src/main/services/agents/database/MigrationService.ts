@@ -1,3 +1,7 @@
+/**
+ * 【中文】Drizzle 生成的 **结构迁移** 执行器：读取 `resources/database/drizzle` 下的 journal 与 SQL，
+ * 与 `migrations` 表对比，按顺序执行未应用的迁移。由 {@link DatabaseManager} 在启动时调用。
+ */
 import { type Client } from '@libsql/client'
 import { loggerService } from '@logger'
 import { getResourcePath } from '@main/utils'

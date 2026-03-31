@@ -3,6 +3,9 @@
  *
  * Handles data migrations (not schema changes) that require code logic.
  * These migrations are tracked in the migrations table with a 'data_' prefix.
+ *
+ * 【中文】与 `MigrationService` 的区别：**不改表结构**，只修正历史数据（例如补全 `message.blocks` 引用）。
+ * 每条数据迁移在 `DATA_MIGRATIONS` 注册，版本号从 10000 起跳，避免与 Drizzle 结构版本号混淆；同样在 `migrations` 表留痕。
  */
 
 import type { Client } from '@libsql/client'

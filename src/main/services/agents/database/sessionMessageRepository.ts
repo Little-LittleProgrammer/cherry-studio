@@ -1,3 +1,9 @@
+/**
+ * 【中文 · 会话消息持久化】
+ *
+ * `AgentMessageRepository`（日志上下文名仍为 AgentMessageRepository）：把 API 层传入的结构化消息序列化为字符串写入 `session_messages`，
+ * 并支持按会话拉取、排序。消息内容格式与渲染侧块（blocks）约定一致；数据修复逻辑见 `migrateBlockReferences.ts`。
+ */
 import { loggerService } from '@logger'
 import type {
   AgentMessageAssistantPersistPayload,

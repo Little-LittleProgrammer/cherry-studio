@@ -1,3 +1,11 @@
+/**
+ * 【中文 · Agent 配置服务】
+ *
+ * 职责：在 SQLite 中维护 **Agent 实体**（类型、模型、指令、可访问路径、MCP 绑定等）。
+ * - **创建**：生成 id，校验模型，把 JSON 字段序列化后写入 `agents` 表；新 Agent 的 `sort_order` 通过事务批量后移插到列表最前。
+ * - **读取列表/单个**：反序列化后，按 Agent 上配置的 `mcps` 调用基类 `listMcpTools`，并把 `allowed_tools` 规范成当前 id 格式。
+ * - **已装插件**：`installed_plugins` 不存库，而从工作区（`accessible_paths[0]`）的 `.claude/plugins.json` 缓存读取，由 `PluginService` 单例完成。
+ */
 import { loggerService } from '@logger'
 import { pluginService } from '@main/services/agents/plugins/PluginService'
 import type {

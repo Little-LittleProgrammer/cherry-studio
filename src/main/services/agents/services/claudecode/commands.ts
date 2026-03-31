@@ -1,3 +1,6 @@
+/**
+ * Claude Code 侧内置斜杠命令列表（展示用）；运行时还会与 SDK 返回的命令合并。
+ */
 import type { SlashCommand } from '@types'
 
 export const builtinSlashCommands: SlashCommand[] = [

@@ -1,3 +1,7 @@
+/**
+ * 工具权限：主进程通过 IPC 向渲染进程发起审批请求，等待用户允许/拒绝后再 resolve SDK 的 `CanUseTool`。
+ * 使用 `pendingRequests` 将 requestId 与 Promise 关联；支持 abort 与无主窗口时的降级拒绝。
+ */
 import { randomUUID } from 'node:crypto'
 
 import type { PermissionResult, PermissionUpdate } from '@anthropic-ai/claude-agent-sdk'
@@ -10,6 +14,7 @@ import { builtinTools } from './tools'
 
 const logger = loggerService.withContext('ClaudeCodeService')
 
+/** 发往前端的工具入参 JSON 预览最大长度，避免超大 payload */
 const MAX_PREVIEW_LENGTH = 2_000
 const shouldAutoApproveTools = process.env.CHERRY_AUTO_ALLOW_TOOLS === '1'
 
@@ -55,9 +60,11 @@ type RendererPermissionResultPayload = {
   updatedInput?: Record<string, unknown>
 }
 
+/** 等待渲染进程响应的权限请求（按 requestId 索引） */
 const pendingRequests = new Map<string, PendingPermissionRequest>()
 let ipcHandlersInitialized = false
 
+/** 将 BigInt/Map/Set/Date 等序列化为可 JSON 化的结构，便于 IPC 传输 */
 const jsonReplacer = (_key: string, value: unknown) => {
   if (typeof value === 'bigint') return value.toString()
   if (value instanceof Map) return Object.fromEntries(value.entries())
@@ -68,6 +75,7 @@ const jsonReplacer = (_key: string, value: unknown) => {
   return value
 }
 
+/** 深拷贝并去掉函数等不可序列化字段，减少 IPC 与日志中的异常 */
 const sanitizeStructuredData = <T>(value: T): T => {
   try {
     return JSON.parse(JSON.stringify(value, jsonReplacer)) as T
@@ -79,6 +87,7 @@ const sanitizeStructuredData = <T>(value: T): T => {
   }
 }
 
+/** 生成工具入参的缩略字符串（超长截断） */
 const buildInputPreview = (value: unknown): string => {
   let preview: string
 
@@ -114,6 +123,7 @@ const broadcastToRenderer = (
   return true
 }
 
+/** 完成待定请求：resolve Promise、清理 abort 监听、通知前端结果 */
 const finalizeRequest = (
   requestId: string,
   update: PermissionResult,
@@ -160,6 +170,7 @@ const finalizeRequest = (
   return true
 }
 
+/** 懒注册 IPC：首次需要弹窗审批时再挂上 handle，避免模块加载副作用 */
 const ensureIpcHandlersRegistered = () => {
   if (ipcHandlersInitialized) return
 
@@ -214,11 +225,13 @@ type PromptForToolApprovalOptions = {
   suggestions?: PermissionUpdate[]
   autoApprove?: boolean
 
-  // NOTICE: This ID is namespaced with session ID, not the raw SDK tool call ID.
-  // Format: `${sessionId}:${rawToolCallId}`, e.g., `session_123:WebFetch_0`
+  // 与原始 SDK tool_use_id 不同：已带 session 前缀，格式 `${sessionId}:${rawToolCallId}`
   toolCallId: string
 }
 
+/**
+ * 弹出工具审批（或测试模式下自动通过）：返回 SDK 所需的 {@link PermissionResult}。
+ */
 export async function promptForToolApproval(
   toolName: string,
   input: Record<string, unknown>,

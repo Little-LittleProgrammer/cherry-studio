@@ -18,6 +18,10 @@
  *   8. User snapshots with `tool_result` emit `tool-result`/`tool-error` using the cached payload.
  *   9. Assistant snapshots with plain text (when no stream events were provided) fall back to
  *        emitting `text-*` parts and a synthetic `finish-step`.
+ *
+ * 中文：把 Claude Code 的流式/快照消息统一转成 AiSDK 的 `TextStreamPart`，
+ * 由 {@link ClaudeStreamState} 记录内容块索引、工具调用与 message_delta 暂存的用量，
+ * 渲染层只需消费标准 chunk，无需理解 Anthropic 原始结构。
  */
 
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'

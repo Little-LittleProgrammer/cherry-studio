@@ -272,6 +272,256 @@ type RendererPermissionRequestPayload = {
      : ["pipe", "pipe", "ignore", "ipc"]
    ```
 
+## 配置管理与服务关联
+
+### 服务层级架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            AgentService                                      │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                      Agent 配置（数据库: agents 表）                   │  │
+│  │  ┌─────────────────────────────────────────────────────────────────┐  │  │
+│  │  │  id, type, name, description                                    │  │  │
+│  │  │  instructions                    ← 系统提示词                    │  │  │
+│  │  │  accessible_paths[]              ← 工作区路径                    │  │  │
+│  │  │  model, plan_model, small_model  ← 模型配置                      │  │  │
+│  │  │  mcps[]                          ← 绑定的 MCP 服务 ID            │  │  │
+│  │  │  allowed_tools[]                 ← 工具白名单                    │  │  │
+│  │  │  configuration{}                 ← 扩展配置（JSON）              │  │  │
+│  │  │  installed_plugins[]             ← 已装插件（从 plugins.json 读）│  │  │
+│  │  └─────────────────────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                     │                                       │
+│                                     │ 创建 Session 时继承                   │
+│                                     ▼                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            SessionService                                    │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                    Session 会话（数据库: sessions 表）                 │  │
+│  │  ┌─────────────────────────────────────────────────────────────────┐  │  │
+│  │  │  id, agent_id (FK → agents.id), agent_type                      │  │  │
+│  │  │  ──────────────────────────────────────────────────────────────  │  │  │
+│  │  │  继承自 AgentBaseSchema（可覆盖）：                              │  │  │
+│  │  │  name, description, instructions                                │  │  │
+│  │  │  accessible_paths[]   ← 可覆盖 Agent 默认路径                    │  │  │
+│  │  │  model, plan_model... ← 可覆盖 Agent 默认模型                    │  │  │
+│  │  │  mcps[]               ← 可覆盖 Agent 的 MCP 绑定                 │  │  │
+│  │  │  allowed_tools[]      ← 可覆盖 Agent 的工具白名单                │  │  │
+│  │  │  configuration{}      ← 可覆盖 Agent 的扩展配置                  │  │  │
+│  │  │  ──────────────────────────────────────────────────────────────  │  │  │
+│  │  │  Session 特有字段：                                              │  │  │
+│  │  │  slash_commands[]     ← SDK 初始化返回的斜杠命令快照             │  │  │
+│  │  └─────────────────────────────────────────────────────────────────┘  │  │
+│  │                                                                       │  │
+│  │  getSession() 返回时动态注入：                                        │  │
+│  │  - tools[]              ← 根据 mcps 调用 listMcpTools() 生成          │  │
+│  │  - normalized allowed_tools ← 兼容旧版 MCP 工具 ID 格式               │  │
+│  │  - slash_commands[]     ← 合并内置命令 + 本地命令插件                 │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                     │                                       │
+│                                     │ invoke() 调用时传入                   │
+│                                     ▼                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          ClaudeCodeService                                   │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                     SDK 调用配置组装                                  │  │
+│  │                                                                       │  │
+│  │  invoke(prompt, session, abortController, lastAgentSessionId)        │  │
+│  │                                                                       │  │
+│  │  ┌───────────────────────────────────────────────────────────────┐   │  │
+│  │  │  从 session 提取的运行时配置：                                  │   │  │
+│  │  │                                                                 │   │  │
+│  │  │  cwd = session.accessible_paths[0]                             │   │  │
+│  │  │                                                                 │   │  │
+│  │  │  环境变量 (env):                                                │   │  │
+│  │  │    ANTHROPIC_API_KEY ← provider.apiKey                         │   │  │
+│  │  │    ANTHROPIC_BASE_URL ← provider.anthropicApiHost              │   │  │
+│  │  │    ANTHROPIC_MODEL ← session.model                             │   │  │
+│  │  │    CLAUDE_CONFIG_DIR ← userData/.claude                        │   │  │
+│  │  │    + session.configuration.env_vars (用户自定义)               │   │  │
+│  │  │                                                                 │   │  │
+│  │  │  SDK Options:                                                  │   │  │
+│  │  │    cwd ← session.accessible_paths[0]                           │   │  │
+│  │  │    systemPrompt.append ← session.instructions                  │   │  │
+│  │  │    permission_mode ← session.configuration.permission_mode     │   │  │
+│  │  │    max_turns ← session.configuration.max_turns                 │   │  │
+│  │  │    allowed_tools ← session.allowed_tools                       │   │  │
+│  │  │    mcp_servers ← session.mcps → 转换为 HTTP MCP URL            │   │  │
+│  │  │    plugins ← agent.installed_plugins → 本地插件路径            │   │  │
+│  │  └───────────────────────────────────────────────────────────────┘   │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 配置字段详解
+
+#### AgentBaseSchema（Agent 和 Session 共享的基础字段）
+
+| 字段 | 类型 | 用途 |
+|-----|------|-----|
+| `name` | string | 显示名称 |
+| `description` | string | 描述 |
+| `accessible_paths` | string[] | 工作区路径（首项作为 `cwd`） |
+| `instructions` | string | 系统提示词（追加到 SDK 默认 prompt） |
+| `model` | string | 主模型 ID（必填） |
+| `plan_model` | string | 规划/思考模型 ID |
+| `small_model` | string | 小模型 ID（快速任务） |
+| `mcps` | string[] | 绑定的 MCP 服务 ID 列表 |
+| `allowed_tools` | string[] | 自动放行的工具 ID 白名单 |
+| `slash_commands` | SlashCommand[] | 斜杠命令列表 |
+| `configuration` | object | 扩展配置（见下表） |
+
+#### configuration 扩展配置
+
+| 字段 | 类型 | 用途 |
+|-----|------|-----|
+| `permission_mode` | 'auto' \| 'plan' \| 'acceptEdits' | SDK 权限模式 |
+| `max_turns` | number | 最大对话轮次 |
+| `env_vars` | Record<string, string> | 自定义环境变量（注入 SDK 子进程） |
+
+### 配置继承与覆盖规则
+
+```typescript
+// SessionService.createSession()
+const sessionData: Partial<CreateSessionRequest> = {
+  ...agent,      // 1. 先继承 Agent 的所有配置
+  ...req         // 2. 再用请求体覆盖
+}
+```
+
+**示例：**
+
+```typescript
+// Agent 配置
+{
+  model: 'claude-sonnet-4-20250514',
+  accessible_paths: ['/Users/work/project-a'],
+  mcps: ['mcp-filesystem', 'mcp-github'],
+  allowed_tools: ['Read', 'Glob', 'Grep']
+}
+
+// 创建 Session 时覆盖模型
+{
+  model: 'claude-opus-4-20250514',  // 覆盖使用 Opus
+  // 其他字段继承自 Agent
+}
+
+// 最终 session 配置
+{
+  model: 'claude-opus-4-20250514',  // 使用覆盖值
+  accessible_paths: ['/Users/work/project-a'],  // 继承
+  mcps: ['mcp-filesystem', 'mcp-github'],  // 继承
+  allowed_tools: ['Read', 'Glob', 'Grep']  // 继承
+}
+```
+
+### 动态注入字段
+
+`getSession()` / `getAgent()` 返回时会动态计算以下字段：
+
+```typescript
+// BaseService.listMcpTools()
+const { tools, legacyIdMap } = await this.listMcpTools(agent.type, agent.mcps)
+session.tools = tools  // 内置工具 + MCP 工具列表
+
+// BaseService.normalizeAllowedTools()
+session.allowed_tools = this.normalizeAllowedTools(session.allowed_tools, tools, legacyIdMap)
+// 兼容旧版 MCP 工具 ID：mcp__serverId__tool → mcp__serverName__tool
+
+// SessionService.listSlashCommands()
+session.slash_commands = await this.listSlashCommands(session.agent_type, agentId)
+// 内置斜杠命令 + .claude/commands/ 下的本地命令
+
+// AgentService.getAgent()
+agent.installed_plugins = await pluginService.listInstalledFromCache(workdir)
+// 从 .claude/plugins.json 读取已安装插件
+```
+
+### 数据库表结构
+
+#### agents 表
+
+```typescript
+// src/main/services/agents/database/schema/agents.schema.ts
+export const agentsTable = sqliteTable('agents', {
+  id: text('id').primaryKey(),
+  type: text('type').notNull(),              // 'claude-code' | 其他类型
+  name: text('name').notNull(),
+  description: text('description'),
+  accessible_paths: text('accessible_paths'), // JSON array
+  instructions: text('instructions'),
+  model: text('model').notNull(),            // 必填
+  plan_model: text('plan_model'),
+  small_model: text('small_model'),
+  mcps: text('mcps'),                        // JSON array of MCP IDs
+  allowed_tools: text('allowed_tools'),      // JSON array of tool IDs
+  configuration: text('configuration'),      // JSON object
+  sort_order: integer('sort_order').default(0),
+  created_at: text('created_at').notNull(),
+  updated_at: text('updated_at').notNull()
+})
+```
+
+#### sessions 表
+
+```typescript
+// src/main/services/agents/database/schema/sessions.schema.ts
+export const sessionsTable = sqliteTable('sessions', {
+  id: text('id').primaryKey(),
+  agent_id: text('agent_id').notNull(),      // FK → agents.id (CASCADE DELETE)
+  agent_type: text('agent_type').notNull(),
+  name: text('name').notNull(),
+  description: text('description'),
+  accessible_paths: text('accessible_paths'), // 可覆盖 Agent 默认值
+  instructions: text('instructions'),
+  model: text('model').notNull(),
+  plan_model: text('plan_model'),
+  small_model: text('small_model'),
+  mcps: text('mcps'),
+  allowed_tools: text('allowed_tools'),
+  slash_commands: text('slash_commands'),    // Session 特有
+  configuration: text('configuration'),
+  sort_order: integer('sort_order').default(0),
+  created_at: text('created_at').notNull(),
+  updated_at: text('updated_at').notNull()
+})
+```
+
+### 调用链路中的配置流转
+
+```
+API: POST /v1/agents/:agentId/sessions/:sessionId/messages
+    │
+    ▼
+SessionMessageService.createSessionMessage(session, messageData, abortController)
+    │
+    ├─► session 来自 SessionService.getSession()
+    │   包含：model, accessible_paths, mcps, allowed_tools, configuration, tools, slash_commands
+    │
+    ▼
+ClaudeCodeService.invoke(prompt, session, abortController, lastAgentSessionId, thinkingOptions)
+    │
+    ├─► 校验 session.model → validateModelId()
+    │
+    ├─► 校验 session.accessible_paths[0] 作为 cwd
+    │
+    ├─► 组装环境变量
+    │   - provider 信息从 model 解析
+    │   - env_vars 从 session.configuration 合并
+    │
+    ├─► 组装 SDK Options
+    │   - permission_mode ← session.configuration.permission_mode
+    │   - max_turns ← session.configuration.max_turns
+    │   - allowed_tools ← session.allowed_tools
+    │   - mcpServers ← session.mcps（转换为 HTTP URL）
+    │   - plugins ← pluginService.listInstalledPluginPackagePaths(session.agent_id)
+    │
+    └─► 调用 SDK query()
+```
+
 ## 内置工具定义 (`tools.ts`)
 
 ```typescript
@@ -438,15 +688,285 @@ if (session.mcps && session.mcps.length > 0) {
 
 ## 插件系统
 
-支持加载本地插件：
+Cherry Studio 实现了完整的 Claude Code 插件系统，支持从市场、ZIP 包和本地目录安装插件。
+
+### 插件类型
+
+| 类型 | 说明 | 存储位置 | 文件格式 |
+|-----|------|---------|---------|
+| `agent` | 自定义 Agent 行为 | `.claude/agents/` | 单文件 `.md` |
+| `command` | 斜杠命令 | `.claude/commands/` | 单文件 `.md` |
+| `skill` | 技能模块 | `.claude/skills/<文件夹>/` | 目录 + `SKILL.md` |
+| `plugin package` | 插件包（可含多组件） | `.claude/plugins/<包名>/` | `.claude-plugin/plugin.json` |
+
+### 磁盘布局
+
+```
+<workdir>/
+└── .claude/
+    ├── agents/           # Agent 单文件插件
+    │   └── my-agent.md
+    ├── commands/         # 斜杠命令单文件
+    │   └── my-command.md
+    ├── skills/           # 技能目录
+    │   └── my-skill/
+    │       └── SKILL.md
+    ├── plugins/          # 插件包（含多组件）
+    │   └── my-plugin/
+    │       ├── .claude-plugin/
+    │       │   └── plugin.json    # 插件清单
+    │       ├── agents/
+    │       ├── commands/
+    │       └── skills/
+    └── plugins.json      # 已安装列表缓存
+```
+
+### 核心服务架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              PluginService (单例)                            │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                           安装来源处理                                  │  │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌───────────────────────┐  │  │
+│  │  │ marketplace:    │  │ ZIP 上传        │  │ 本地目录              │  │  │
+│  │  │ plugin/skill:.. │  │ installFromZip  │  │ installFromDirectory │  │  │
+│  │  └─────────────────┘  └─────────────────┘  └───────────────────────┘  │  │
+│  │           │                    │                    │                  │  │
+│  │           └────────────────────┼────────────────────┘                  │  │
+│  │                                ▼                                       │  │
+│  │                    ┌───────────────────┐                               │  │
+│  │                    │ findPluginRoots   │ ← 找 plugin.json 或 SKILL.md  │  │
+│  │                    └───────────────────┘                               │  │
+│  │                                │                                       │  │
+│  │                                ▼                                       │  │
+│  │  ┌─────────────────────────────────────────────────────────────────┐  │  │
+│  │  │              installPluginRoots / installSkillRoots             │  │  │
+│  │  │              扫描 agents/commands/skills 并注册                  │  │  │
+│  │  └─────────────────────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                     │                                       │
+│                                     ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                    PluginCacheStore (缓存管理)                        │  │
+│  │  - listInstalled(): 读 plugins.json，缺失则 rebuild                  │  │
+│  │  - upsert(): 新增/更新已安装项                                        │  │
+│  │  - remove(): 移除已安装项                                             │  │
+│  │  - rebuild(): 全量扫描文件系统重建缓存                                │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                     │                                       │
+│                                     ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                    PluginInstaller (磁盘操作)                         │  │
+│  │  - installFilePlugin(): 单文件安装（备份-复制-恢复模式）              │  │
+│  │  - installSkill(): 技能目录安装                                       │  │
+│  │  - uninstallFilePlugin(): 删除单文件                                  │  │
+│  │  - uninstallSkill(): 删除技能目录                                     │  │
+│  │  - updateFilePluginContent(): 更新文件内容                            │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 安装流程
+
+#### 1. 市场安装
+
+```
+用户选择 marketplace:plugin:owner/repo/name 或 marketplace:skill:owner/repo/name
+    │
+    ▼
+PluginService.install()
+    │
+    ├─► parseMarketplaceSource() → 解析标识符
+    │
+    ├─► Plugin: 调用 /api/resolve/{owner}/{repo}/{name} 获取 Git URL
+    │   Skill: 调用 /api/v2/skills/resolve 获取 sourceUrl + relDir
+    │
+    ├─► createMarketplaceTempDir() → 创建临时目录
+    │
+    ├─► cloneRepository() → git clone --depth 1
+    │       │
+    │       ├─► resolveDefaultBranch() → 获取默认分支名
+    │       └─► 执行 git clone 命令
+    │
+    ├─► findPluginRoots() / resolveSkillDirectory()
+    │
+    ├─► installSinglePlugin() / installSkillFromDirectory()
+    │       │
+    │       ├─► 复制到 .claude/plugins/<包名>/ 或 .claude/skills/<名>/
+    │       ├─► 扫描 agents/commands/skills 子目录
+    │       ├─► 解析 Markdown frontmatter 元数据
+    │       └─► registerPluginInCache() → 更新 plugins.json
+    │
+    └─► safeRemoveDirectory() → 清理临时目录
+```
+
+#### 2. ZIP/目录安装
+
+```
+用户上传 ZIP 或选择本地目录
+    │
+    ▼
+PluginService.installFromZip() / installFromDirectory()
+    │
+    ├─► 校验 ZIP 格式 / 目录存在性
+    │
+    ├─► extractZip() → 解压到临时目录（防 zip bomb）
+    │       │
+    │       ├─► 检查总大小 < 100MB
+    │       ├─► 检查文件数 < 1000
+    │       └─► 解压
+    │
+    ├─► installFromSourceDir()
+    │       │
+    │       ├─► findPluginRoots() → 找含 .claude-plugin/plugin.json 的目录
+    │       │       │
+    │       │       ├─► 检查 marketplace.json 聚合市场
+    │       │       ├─► 递归扫描子目录（最大深度 10）
+    │       │       └─► 返回所有插件根目录
+    │       │
+    │       ├─► 若找到 plugin roots → installPluginRoots()
+    │       │
+    │       └─► 否则 → findAllSkillDirectories() → installSkillRoots()
+    │
+    └─► 返回 { packages, totalInstalled, totalFailed }
+```
+
+### 插件清单格式 (plugin.json)
+
+```json
+{
+  "name": "my-plugin",           // 必填：kebab-case 包名
+  "version": "1.0.0",
+  "description": "插件描述",
+  "author": { "name": "作者", "email": "email@example.com" },
+  "keywords": ["ai", "automation"],
+
+  // 组件路径（相对路径）
+  "commands": "./commands",      // 或 ["./cmd1", "./cmd2"]
+  "agents": "./agents",
+  "skills": "./skills",
+
+  // 配置路径
+  "hooks": "./hooks.json",       // 或内联对象
+  "mcpServers": "./mcp.json",
+  "lspServers": "./lsp.json"
+}
+```
+
+### 市场聚合清单 (marketplace.json)
+
+```json
+{
+  "name": "My Marketplace",
+  "owner": { "name": "组织名" },
+  "plugins": [
+    {
+      "name": "plugin-a",
+      "source": "./plugins/plugin-a",  // 相对路径
+      "strict": true                   // 必须有 plugin.json
+    },
+    {
+      "name": "plugin-b",
+      "source": { "github": "owner/repo" }  // Git 源
+    }
+  ],
+  "metadata": {
+    "pluginRoot": "./plugins"  // 所有插件的基准路径
+  }
+}
+```
+
+### SDK 插件集成
+
+`ClaudeCodeService.invoke()` 调用时，收集已安装插件包路径传递给 SDK：
 
 ```typescript
+// ClaudeCodeService.invoke() 内部
 const pluginPaths = await pluginService.listInstalledPluginPackagePaths(session.agent_id)
 if (pluginPaths.length > 0) {
   plugins = pluginPaths.map((pluginPath) => ({ type: 'local', path: pluginPath }))
 }
 options.plugins = plugins
 ```
+
+**路径获取逻辑：**
+
+```typescript
+async listInstalledPluginPackagePaths(agentId: string): Promise<string[]> {
+  // 1. 从缓存获取已安装列表
+  const installedPlugins = await this.listInstalledFromCache(workdir)
+
+  // 2. 收集所有 packageName
+  const packageNames = new Set<string>()
+  for (const plugin of installedPlugins) {
+    if (plugin.metadata.packageName) {
+      packageNames.add(plugin.metadata.packageName)
+    }
+  }
+
+  // 3. 验证每个包的 plugin.json 存在
+  for (const packageName of packageNames) {
+    const pluginPath = path.join(workdir, '.claude', 'plugins', packageName)
+    const manifestPath = path.join(pluginPath, '.claude-plugin', 'plugin.json')
+    if (await fileExists(manifestPath)) {
+      pluginPaths.push(pluginPath)
+    }
+  }
+
+  return pluginPaths
+}
+```
+
+### 安全措施
+
+| 威胁 | 防护措施 |
+|-----|---------|
+| **路径穿越** | `isPathInside()` 校验自定义路径必须在插件目录内 |
+| **ZIP 炸弹** | 总大小 < 100MB，文件数 < 1000 |
+| **符号链接环** | `findPluginRoots()` 最大递归深度 10，`dereference: true` 解引用 |
+| **文件名攻击** | `sanitizeFilename()` / `sanitizeFolderName()` 移除非法字符，截断过长名称 |
+| **Windows EPERM** | `PluginInstaller` 使用备份-复制-恢复模式，减少直接覆盖 |
+| **重复安装** | `upsert()` 按 filename+type 去重更新 |
+
+### 缓存重建流程
+
+当 `plugins.json` 缺失或损坏时，`PluginCacheStore.rebuild()` 全量扫描：
+
+```typescript
+async rebuild(workdir: string): Promise<InstalledPlugin[]> {
+  // 并行收集四类来源
+  await Promise.all([
+    collectFilePlugins(workdir, 'agent'),   // 扫描 .claude/agents/*.md
+    collectFilePlugins(workdir, 'command'), // 扫描 .claude/commands/*.md
+    collectSkillPlugins(workdir),           // 扫描 .claude/skills/*/SKILL.md
+    collectPackagePlugins(workdir),         // 扫描 .claude/plugins/*/ 并读 manifest
+  ])
+
+  // 写回缓存文件
+  await writeCacheFile(claudePath, { version: 1, lastUpdated: Date.now(), plugins })
+}
+```
+
+### IPC 通道
+
+| 通道 | 方向 | 用途 |
+|-----|------|-----|
+| `claudeCodePlugin:list-available` | Renderer → Main | 查询可安装插件（预留） |
+| `claudeCodePlugin:install` | Renderer → Main | 安装插件 |
+| `claudeCodePlugin:uninstall` | Renderer → Main | 卸载插件 |
+| `claudeCodePlugin:list-installed` | Renderer → Main | 列出已安装插件 |
+| `claudeCodePlugin:invalidate-cache` | Renderer → Main | 刷新缓存 |
+
+### 市场 Registry API
+
+| Endpoint | 用途 |
+|----------|-----|
+| `GET /api/resolve/{owner}/{repo}/{plugin}` | 解析插件 Git URL |
+| `POST /api/v2/skills/resolve` | 解析技能源 URL（body: `{ target, limit, offset }`） |
+| `POST /api/skills/{owner}/{repo}/{name}/install` | 回报技能安装次数 |
+
+**API 基地址：** `https://api.claude-plugins.dev`
 
 ## 错误处理
 

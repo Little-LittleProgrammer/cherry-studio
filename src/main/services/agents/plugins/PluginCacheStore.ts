@@ -1,3 +1,8 @@
+/**
+ * 维护「代理工作目录」下 `.claude/plugins.json` 的缓存：记录已安装的 agent/command/skill/包内组件。
+ * 列表优先读缓存以提速；缓存缺失或损坏时扫描 `.claude/agents|commands|skills` 与 `.claude/plugins/*` 重建。
+ * 路径解析通过构造函数注入的 deps 完成，便于测试或与 {@link PluginService} 的目录约定对齐。
+ */
 import { loggerService } from '@logger'
 import { directoryExists, fileExists, isPathInside, pathExists, writeWithLock } from '@main/utils/file'
 import {
@@ -13,6 +18,7 @@ import * as path from 'path'
 
 const logger = loggerService.withContext('PluginCacheStore')
 
+/** 由外部注入：扩展名白名单、各类型子目录名、`.claude` 根路径解析 */
 interface PluginCacheStoreDeps {
   allowedExtensions: string[]
   getPluginDirectoryName: (type: PluginType) => 'agents' | 'commands' | 'skills'
@@ -23,6 +29,7 @@ interface PluginCacheStoreDeps {
 export class PluginCacheStore {
   constructor(private readonly deps: PluginCacheStoreDeps) {}
 
+  /** 读缓存；失败则 `rebuild` 全量扫描文件系统并写回 plugins.json */
   async listInstalled(workdir: string): Promise<InstalledPlugin[]> {
     const claudePath = this.deps.getClaudeBasePath(workdir)
     const cacheData = await this.readCacheFile(claudePath)
@@ -36,9 +43,7 @@ export class PluginCacheStore {
     return await this.rebuild(workdir)
   }
 
-  /**
-   * Ensure cache data exists, rebuilding from filesystem if necessary
-   */
+  /** 保证内存侧有可用缓存结构；无文件时先 rebuild 再包装为 CachedPluginsData */
   private async ensureCacheData(workdir: string): Promise<{ cacheData: CachedPluginsData; claudePath: string }> {
     const claudePath = this.deps.getClaudeBasePath(workdir)
     const existingCache = await this.readCacheFile(claudePath)
@@ -54,6 +59,7 @@ export class PluginCacheStore {
     }
   }
 
+  /** 按 filename+type 更新或追加一条，并原子写入 plugins.json */
   async upsert(workdir: string, plugin: InstalledPlugin): Promise<void> {
     const { cacheData, claudePath } = await this.ensureCacheData(workdir)
     const plugins = cacheData.plugins
@@ -83,6 +89,7 @@ export class PluginCacheStore {
     await this.writeCacheFile(claudePath, data)
   }
 
+  /** 从缓存数组中移除匹配项并重写文件 */
   async remove(workdir: string, filename: string, type: PluginType): Promise<void> {
     const { cacheData, claudePath } = await this.ensureCacheData(workdir)
     const filtered = cacheData.plugins.filter((p) => !(p.filename === filename && p.type === type))
@@ -97,6 +104,7 @@ export class PluginCacheStore {
     await this.writeCacheFile(claudePath, data)
   }
 
+  /** 并行收集四类来源后写回缓存：散文件 agent/command、技能文件夹、`.claude/plugins` 下的 npm 式包 */
   async rebuild(workdir: string): Promise<InstalledPlugin[]> {
     logger.info('Rebuilding plugin cache from filesystem', { workdir })
 
@@ -135,6 +143,7 @@ export class PluginCacheStore {
     return plugins
   }
 
+  /** 扫描 `.claude/agents` 或 `commands` 下的单个 .md 插件 */
   private async collectFilePlugins(
     workdir: string,
     type: Exclude<PluginType, 'skill'>,
@@ -174,6 +183,7 @@ export class PluginCacheStore {
     }
   }
 
+  /** 扫描 `.claude/skills` 下含 SKILL.md 的目录 */
   private async collectSkillPlugins(workdir: string, plugins: InstalledPlugin[]): Promise<void> {
     const skillsPath = this.deps.getClaudePluginDirectory(workdir, 'skill')
     const claudePath = this.deps.getClaudeBasePath(workdir)
@@ -199,6 +209,7 @@ export class PluginCacheStore {
     }
   }
 
+  /** 扫描 `.claude/plugins/<包名>`，读取 `.claude-plugin/plugin.json` 并按 manifest 收集 skills/agents/commands */
   private async collectPackagePlugins(workdir: string, plugins: InstalledPlugin[]): Promise<void> {
     const claudePath = this.deps.getClaudeBasePath(workdir)
     const pluginsPath = path.join(claudePath, 'plugins')
@@ -245,6 +256,7 @@ export class PluginCacheStore {
     }
   }
 
+  /** 默认子目录 + manifest 自定义路径（校验必须落在包目录内，防路径穿越） */
   private async collectPackageComponentPaths(
     pluginDir: string,
     defaultSubDir: string,
@@ -281,6 +293,7 @@ export class PluginCacheStore {
     }
   }
 
+  /** 在某一目录下枚举条目：技能按子文件夹 + SKILL.md；agent/command 按单文件 .md */
   private async scanAndCollectComponents(
     dirPath: string,
     type: PluginType,
@@ -340,6 +353,7 @@ export class PluginCacheStore {
     }
   }
 
+  /** 读取并 Zod 校验；任一失败返回 null 触发重建 */
   private async readCacheFile(claudePath: string): Promise<CachedPluginsData | null> {
     const cachePath = path.join(claudePath, 'plugins.json')
     try {
@@ -354,6 +368,7 @@ export class PluginCacheStore {
     }
   }
 
+  /** 带锁原子写入，避免并发读写到半份 JSON */
   private async writeCacheFile(claudePath: string, data: CachedPluginsData): Promise<void> {
     const cachePath = path.join(claudePath, 'plugins.json')
     const content = JSON.stringify(data, null, 2)

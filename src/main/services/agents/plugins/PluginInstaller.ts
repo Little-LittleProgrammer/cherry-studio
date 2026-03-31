@@ -1,3 +1,8 @@
+/**
+ * Agent 工作区内插件文件的**磁盘级**安装/卸载：单文件（agent/command）与技能目录。
+ * 使用「先备份再写入、失败则回滚」模式，减轻 Windows 同步盘等场景下的 EPERM 问题。
+ * 上层业务逻辑与缓存同步由 {@link PluginService} 负责。
+ */
 import { loggerService } from '@logger'
 import { pathExists } from '@main/utils/file'
 import { copyDirectoryRecursive, deleteDirectoryRecursive } from '@main/utils/fileOperations'
@@ -7,6 +12,7 @@ import * as fs from 'fs'
 
 const logger = loggerService.withContext('PluginInstaller')
 
+/** 封装 copy/rename/unlink 等原子性安装语义，抛出统一的 {@link PluginError} */
 export class PluginInstaller {
   async installFilePlugin(agentId: string, sourceAbsolutePath: string, destPath: string): Promise<void> {
     await this.installWithBackup({
@@ -92,11 +98,11 @@ export class PluginInstaller {
   }
 
   /**
-   * Shared backup-copy-restore pattern for both file and directory installs.
-   * 1. Rename existing destPath to .bak (avoids EPERM on Windows sync folders)
-   * 2. Copy source to destPath
-   * 3. On success: delete .bak
-   * 4. On failure: clean partial destPath, restore .bak
+   * 文件与目录安装共用的备份-复制-恢复流程：
+   * 1. 若目标已存在：rename 为 `.bak`（减少 Windows 同步目录上直接覆盖的 EPERM）
+   * 2. 执行 copy
+   * 3. 成功则删除 `.bak`
+   * 4. 失败则删掉不完整目标并把 `.bak` 改回原路径
    */
   private async installWithBackup(opts: {
     destPath: string

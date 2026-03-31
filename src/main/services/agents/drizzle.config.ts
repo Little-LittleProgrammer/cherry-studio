@@ -16,6 +16,9 @@
  */
 /**
  * Drizzle Kit configuration for agents database
+ *
+ * 【中文】仅用于 **CLI**（`pnpm agents:generate` 等）：指定 schema 入口与迁移 SQL 输出目录 `resources/database/drizzle`。
+ * 运行时真正使用的库路径由 `getDbPath()`（Electron `userData`）决定，与这里的 `dbCredentials.url` 在开发机上可能一致，但部署路径以应用为准。
  */
 
 import path from 'node:path'
