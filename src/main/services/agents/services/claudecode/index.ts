@@ -45,6 +45,7 @@
  * - 流式消息 → UI chunk：`transform.ts`、`claude-stream-state.ts`
  * - 弹窗审批 IPC：`tool-permissions.ts`
  */
+import { fork } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createRequire } from 'node:module'
 import path from 'node:path'
@@ -55,7 +56,8 @@ import type {
   McpHttpServerConfig,
   Options,
   SDKMessage,
-  SdkPluginConfig
+  SdkPluginConfig,
+  SpawnedProcess
 } from '@anthropic-ai/claude-agent-sdk'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { loggerService } from '@logger'
@@ -65,6 +67,7 @@ import { isWin } from '@main/constant'
 import { pluginService } from '@main/services/agents/plugins/PluginService'
 import { configManager } from '@main/services/ConfigManager'
 import { autoDiscoverGitBash } from '@main/utils/process'
+import { rtkRewrite } from '@main/utils/rtk'
 import getLoginShellEnvironment from '@main/utils/shell-env'
 import { languageEnglishNameMap } from '@shared/config/languages'
 import { withoutTrailingApiVersion } from '@shared/utils'
@@ -375,6 +378,38 @@ class ClaudeCodeService implements AgentServiceInterface {
 
     // --- 阶段 F：Options 总装（含 MCP、多目录、resume、thinking）---
 
+    const rtkRewriteHook: HookCallback = async (input) => {
+      if (input.hook_event_name !== 'PreToolUse') {
+        return {}
+      }
+
+      // Only rewrite Bash tool commands
+      if (input.tool_name !== 'Bash' && input.tool_name !== 'builtin_Bash') {
+        return {}
+      }
+
+      const toolInput = input.tool_input as Record<string, unknown> | undefined
+      const command = toolInput?.command
+      if (typeof command !== 'string' || !command.trim()) {
+        return {}
+      }
+
+      const rewritten = await rtkRewrite(command)
+      if (!rewritten) {
+        return {}
+      }
+
+      logger.info('rtk rewrote Bash command', { original: command, rewritten })
+
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          updatedInput: { ...toolInput, command: rewritten }
+        }
+      }
+    }
+
+    // Build SDK options from parameters
     const options: Options = {
       abortController,
       cwd,
@@ -384,6 +419,20 @@ class ClaudeCodeService implements AgentServiceInterface {
       stderr: (chunk: string) => {
         logger.warn('claude stderr', { chunk })
         errorChunks.push(chunk)
+      },
+      spawnClaudeCodeProcess: (spawnOptions) => {
+        const child = fork(spawnOptions.args[0], spawnOptions.args.slice(1), {
+          cwd: spawnOptions.cwd,
+          env: spawnOptions.env as NodeJS.ProcessEnv,
+          stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+          signal: spawnOptions.signal
+        })
+        child.stderr?.on('data', (data: Buffer) => {
+          const text = data.toString()
+          logger.warn('claude stderr', { chunk: text })
+          errorChunks.push(text)
+        })
+        return child as unknown as SpawnedProcess
       },
       systemPrompt: session.instructions
         ? {
@@ -406,7 +455,7 @@ class ClaudeCodeService implements AgentServiceInterface {
       hooks: {
         PreToolUse: [
           {
-            hooks: [preToolUseHook]
+            hooks: [rtkRewriteHook, preToolUseHook]
           }
         ]
       },
