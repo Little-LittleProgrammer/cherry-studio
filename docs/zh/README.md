@@ -76,6 +76,10 @@ Cherry Studio 是一款支持多个大语言模型（LLM）服务商的桌面客
 
 https://docs.cherry-ai.com
 
+## 🏗️ 架构专题
+
+- [项目架构专题](./architecture/README.md)
+
 # 🌠 界面
 
 ![](https://github.com/user-attachments/assets/36dddb2c-e0fb-4a5f-9411-91447bab6e18)
