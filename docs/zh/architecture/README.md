@@ -56,15 +56,15 @@ flowchart TB
 
 ## 代码地图
 
-| 目录 | 角色 |
-| --- | --- |
-| `src/main` | Electron 主进程、窗口管理、IPC 注册、系统服务 |
-| `src/preload` | 安全桥接层，定义 `window.api` |
-| `src/renderer/src` | 主界面与多窗口前端 |
-| `packages/shared` | 跨进程常量、类型、IPC channel、公共工具 |
-| `packages/aiCore` | 统一模型执行抽象、provider 注册、插件链、运行时 |
-| `packages/ai-sdk-provider` | CherryIN 等 AI SDK provider 扩展 |
-| `packages/mcp-trace` | OpenTelemetry 风格的调用追踪基础能力 |
+| 目录                       | 角色                                            |
+| -------------------------- | ----------------------------------------------- |
+| `src/main`                 | Electron 主进程、窗口管理、IPC 注册、系统服务   |
+| `src/preload`              | 安全桥接层，定义 `window.api`                   |
+| `src/renderer/src`         | 主界面与多窗口前端                              |
+| `packages/shared`          | 跨进程常量、类型、IPC channel、公共工具         |
+| `packages/aiCore`          | 统一模型执行抽象、provider 注册、插件链、运行时 |
+| `packages/ai-sdk-provider` | CherryIN 等 AI SDK provider 扩展                |
+| `packages/mcp-trace`       | OpenTelemetry 风格的调用追踪基础能力            |
 
 ## 适合先看的源码入口
 
@@ -78,4 +78,3 @@ flowchart TB
 - 路由：`src/renderer/src/Router.tsx`
 - Redux Store：`src/renderer/src/store/index.ts`
 - Dexie 数据库：`src/renderer/src/databases/index.ts`
-
