@@ -64,6 +64,8 @@ AI Core 的一个关键原理是“调用过程可插拔”。
 - logging
 - prompt tool use
 
+**工具调用专题**（类型划分、原生 / Prompt 双路径、Chunk 与 MCP 执行链）：见同目录 [工具调用详解.md](./工具调用详解.md)。
+
 因此一次模型调用并不是简单的 `fetch`：
 
 1. 解析模型与 provider。
