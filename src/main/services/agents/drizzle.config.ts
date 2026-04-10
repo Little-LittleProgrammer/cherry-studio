@@ -20,31 +20,30 @@
  * 【中文】仅用于 **CLI**（`pnpm agents:generate` 等）：指定 schema 入口与迁移 SQL 输出目录 `resources/database/drizzle`。
  * 运行时真正使用的库路径由 `getDbPath()`（Electron `userData`）决定，与这里的 `dbCredentials.url` 在开发机上可能一致，但部署路径以应用为准。
  */
-
-import path from 'node:path'
-
 import { defineConfig } from 'drizzle-kit'
-import { app } from 'electron'
 
-function getDbPath() {
-  return path.join(app.getPath('userData'), 'Data', 'agents.db')
+function getDefaultDbUrl(): string {
+  const platform = process.platform
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? ''
+  const appName = process.env.NODE_ENV === 'development' ? 'CherryStudioDev' : 'CherryStudio'
+
+  switch (platform) {
+    case 'darwin':
+      return `${home}/Library/Application Support/${appName}/Data/agents.db`
+    case 'win32':
+      return `${process.env.APPDATA ?? `${home}/AppData/Roaming`}/${appName}/Data/agents.db`
+    default:
+      // Linux: ~/.config/<appName>
+      return `${process.env.XDG_CONFIG_HOME ?? `${home}/.config`}/${appName}/Data/agents.db`
+  }
 }
-
-export function getOldDbPath() {
-  // production
-  return path.join(app.getPath('userData'), 'agents.db')
-}
-
-const resolvedDbPath = getDbPath()
-
-export const dbPath = resolvedDbPath
 
 export default defineConfig({
   dialect: 'sqlite',
   schema: './src/main/services/agents/database/schema/index.ts',
   out: './resources/database/drizzle',
   dbCredentials: {
-    url: `file:${resolvedDbPath}`
+    url: process.env.AGENTS_DB_URL ?? getDefaultDbUrl()
   },
   verbose: true,
   strict: true
