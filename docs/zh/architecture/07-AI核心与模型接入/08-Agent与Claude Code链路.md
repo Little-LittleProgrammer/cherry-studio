@@ -35,6 +35,7 @@ Agent 子系统使用主进程 SQLite（Drizzle ORM）而非渲染层 Dexie：
 
 - `setImmediate` 启动处理，避免上层尚未订阅就丢首批流事件。
 - 工具权限通过 `canUseTool` + `preToolUseHook` 双机制兜底。
+- Claude Code 不只和 Anthropic 官方 API 绑定，也存在一组 Anthropic-compatible provider 接入约束。
 
 ## 渲染侧集成
 
@@ -45,7 +46,12 @@ Agent 子系统使用主进程 SQLite（Drizzle ORM）而非渲染层 Dexie：
 
 这保证 Agent 消息和普通助手消息在 UI 层可共存。
 
+补充：
+
+- Agent 流中的原始 SDK 事件会先以 `RAW` chunk 形式进入统一适配层。
+- 当 Claude Code 返回 `init` / `compact` 事件且带有 `session_id` 时，渲染侧会同步更新当前 session 标识。
+- 因此 Agent 链路虽然独立于普通聊天执行器，但在 UI 渲染层仍复用同一套消息块模型。
+
 ## 约束说明
 
 `agents/` 子系统正处于 v2 重构窗口，文档和改动应优先聚焦“关键修复与行为一致性”，避免扩散数据模型变更。
-

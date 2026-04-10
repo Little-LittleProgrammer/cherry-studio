@@ -2,6 +2,16 @@
 
 本章节聚焦 Cherry Studio 的 AI 主链路：从渲染层发起请求，到 `@cherrystudio/ai-core` 执行，再到 MCP/知识库/记忆/Agent/Trace 等扩展能力协同。
 
+覆盖范围不仅包括聊天补全，还包括：
+
+- 图像生成与图像端点回退
+- Embedding / Reranker / Speech / Transcription 等模型类型的内核支持
+- Provider / Hub / alias 注册体系
+- 模型原生搜索与外部 Web Search Provider
+- 知识库预处理、RAG 检索、Reranker
+- 长期记忆的抽取、去重、恢复、检索
+- Agent / Claude Code 与兼容 Anthropic API provider
+
 目标是回答三个问题：
 
 1. AI 相关代码分层在哪里，边界怎么划分？
@@ -56,7 +66,10 @@ flowchart TB
 | 插件系统 | `packages/aiCore/src/core/plugins/`、`src/renderer/src/aiCore/plugins/` |
 | MCP 主进程服务 | `src/main/services/MCPService.ts` |
 | 知识库服务 | `src/main/services/KnowledgeService.ts` |
+| 知识预处理 | `src/main/knowledge/preprocess/` |
+| 知识重排 | `src/main/knowledge/reranker/` |
 | 记忆服务 | `src/main/services/memory/MemoryService.ts`、`src/renderer/src/services/MemoryService.ts` |
+| WebSearch Provider | `src/renderer/src/providers/WebSearchProvider/` |
 | Agent 服务 | `src/main/services/agents/services/` |
 | Claude Code 适配 | `src/main/services/agents/services/claudecode/index.ts` |
 | 链路追踪 | `packages/mcp-trace/`、`src/renderer/src/services/SpanManagerService.ts`、`src/main/services/NodeTraceService.ts` |
@@ -70,4 +83,3 @@ flowchart TB
 - `知识记忆系统.md` -> 迁移到 `07`
 - `aiCoreSdk.md` -> 迁移到 `03`
 - `claude-agent-sdk-design.md` -> 迁移到 `08`
-
