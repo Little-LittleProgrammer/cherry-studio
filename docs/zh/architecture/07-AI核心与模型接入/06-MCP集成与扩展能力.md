@@ -78,9 +78,22 @@ MCP OAuth 相关实现位于 `src/main/services/mcp/oauth/`。
 
 - builtin MCP server 会在主进程内直接创建并接入。
 - 部分 builtin server 使用 in-memory transport。
-- `nowledgeMem` 当前走特化的本地 HTTP MCP 路径，而不是普通 in-memory。
+- `knowledgeMem` 走特化的本地 HTTP MCP 路径（StreamableHTTP），而不是普通 in-memory。
+- `flomo` 使用 StreamableHTTP 连接到特定 URL（最近新增的内置服务）。
 
-这些特例是产品层“内置工具能力”的落点，扩展时需要和通用外部 MCP server 区分。
+**新增内置 server 的常见场景**：
+
+| Server | Transport | 用途 |
+|--------|-----------|------|
+| knowledge | StreamableHTTP | 知识库记忆服务 |
+| flomo | StreamableHTTP | Flomo 笔记集成 |
+| 其他 builtin | InMemory | 浏览器自动化、Claw、Assistant 等 |
+
+这些特例是产品层”内置工具能力”的落点，扩展时需要和通用外部 MCP server 区分。
+
+### 连接超时与重试
+
+MCP 客户端初始化支持连接超时配置。对于 stdio 传输，还会解析登录 shell 环境变量，处理 bundle 降级（npx → bun，uv/uvx 使用内置版本），以及 DXT server 配置解析。
 
 ## 渲染侧如何使用 MCP
 

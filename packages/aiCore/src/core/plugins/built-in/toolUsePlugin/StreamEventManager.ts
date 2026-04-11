@@ -106,6 +106,17 @@ export class StreamEventManager {
   /**
    * 处理递归调用并将结果流接入当前流
    */
+  /**
+   * 该方法主要用于处理递归调用的情况。
+   * 当工具插件执行过程中，需要再次发起对话流（通常用在多轮对话工具链路时），
+   * 就通过此方法执行递归请求，将递归的流事件内容继续注入到当前的事件流中。
+   * 
+   * 步骤：
+   * 1. 重置当前步骤的工具调用状态，表示正式进入新的步骤。
+   * 2. 调用 AiRequestContext.recursiveCall 方法发起递归请求，获得返回结果。
+   * 3. 如果结果中含有 fullStream 流，则利用 pipeRecursiveStream 方法将递归流按顺序接入当前流。
+   * 4. 若递归结果未包含 fullStream，则记录警告日志。
+   */
   async handleRecursiveCall<TParams extends StreamTextParams>(
     controller: StreamController,
     recursiveParams: Partial<TParams>,
@@ -115,8 +126,10 @@ export class StreamEventManager {
     // 重置工具执行状态，准备处理新的步骤
     context.hasExecutedToolsInCurrentStep = false
 
+    // 发起递归调用，获取结果
     const recursiveResult = await context.recursiveCall(recursiveParams)
 
+    // 判断递归是否返回流结果，有则传递到当前流
     if (hasFullStream(recursiveResult)) {
       await this.pipeRecursiveStream(controller, recursiveResult.fullStream)
     } else {

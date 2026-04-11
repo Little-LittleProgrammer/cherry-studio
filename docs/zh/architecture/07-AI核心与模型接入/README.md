@@ -6,7 +6,7 @@
 
 - 图像生成与图像端点回退
 - Embedding / Reranker / Speech / Transcription 等模型类型的内核支持
-- Provider / Hub / alias 注册体系
+- Provider / Extension / alias 注册体系
 - 模型原生搜索与外部 Web Search Provider
 - 知识库预处理、RAG 检索、Reranker
 - 长期记忆的抽取、去重、恢复、检索
@@ -38,7 +38,7 @@
 flowchart TB
   User[用户发送消息]
   UI[渲染层\nRedux Thunk / ApiService]
-  Orchestration[渲染AI编排层\nprepareParams / PluginBuilder / ModernAiProvider]
+  Orchestration[渲染AI编排层\nprepareParams / PluginBuilder / AiProvider]
   Core[@cherrystudio/ai-core\nruntime / providers / models / plugins / options]
   Model[模型供应商 API]
   Tools[工具与扩展\nMCP / 知识库 / 记忆 / WebSearch]
@@ -59,7 +59,7 @@ flowchart TB
 | --- | --- |
 | AI 请求入口 | `src/renderer/src/store/thunk/messageThunk.ts` |
 | API 编排 | `src/renderer/src/services/ApiService.ts` |
-| 渲染侧 AI 入口 | `src/renderer/src/aiCore/index.ts`、`src/renderer/src/aiCore/index_new.ts` |
+| 渲染侧 AI 入口 | `src/renderer/src/aiCore/index.ts`、`src/renderer/src/aiCore/AiProvider.ts` |
 | 参数构建 | `src/renderer/src/aiCore/prepareParams/` |
 | Provider 适配 | `src/renderer/src/aiCore/provider/` |
 | aiCore 运行时 | `packages/aiCore/src/core/runtime/` |

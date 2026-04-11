@@ -20,20 +20,39 @@ import { RuntimeExecutor } from './executor'
  * 创建运行时执行器 - 支持类型安全的已知provider
  * 自动确保 provider 已初始化
  */
+/**
+ * 创建并返回一个 RuntimeExecutor 执行器实例。
+ * 
+ * 执行器（Executor）是运行时的核心组件，负责将已初始化的 AI Provider（如 OpenAI、Azure 等）
+ * 及其中间件插件、模型解析逻辑等组装在一起，并通过标准接口对外暴露 AI 调用能力。
+ * 执行器屏蔽了底层 Provider 细节，使得上层可以以统一方式进行文本生成、图像生成等任务。
+ * 
+ * @param providerId 指定的 Provider 扩展 ID
+ * @param options    对应 Provider 需要的配置参数
+ * @param plugins    可选插件列表，会注入到执行器中参与调用流程
+ * @returns          创建好的类型安全的 RuntimeExecutor 实例
+ */
 export async function createExecutor<
   TSettingsMap extends Record<string, any> = CoreProviderSettingsMap,
   T extends StringKeys<TSettingsMap> = StringKeys<TSettingsMap>
->(providerId: T, options: TSettingsMap[T], plugins?: AiPlugin[]): Promise<RuntimeExecutor<TSettingsMap, T>> {
+>(
+  providerId: T,
+  options: TSettingsMap[T],
+  plugins?: AiPlugin[]
+): Promise<RuntimeExecutor<TSettingsMap, T>> {
+  // 检查 provider 是否已被注册
   if (!extensionRegistry.has(providerId)) {
     throw new Error(`Provider extension "${providerId}" not registered`)
   }
 
+  // 创建 provider 实例（如果尚未初始化则会初始化）
   const provider = await extensionRegistry.createProvider(providerId, options || {})
 
-  // Extract model resolver from variant's resolveModel declaration (type-safe at extension level)
+  // 从扩展注册表提取此 Provider 的模型解析器（用于选择和解析具体实现的 AI 模型）
   const resolver = extensionRegistry.getModelResolver(providerId as string)
   const modelResolver = resolver ? (modelId: string) => resolver(provider, modelId) : undefined
 
+  // 最终组装并返回 RuntimeExecutor 实例
   return RuntimeExecutor.create<TSettingsMap, T>(providerId, provider, options, plugins, modelResolver)
 }
 

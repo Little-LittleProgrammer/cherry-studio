@@ -44,17 +44,19 @@ flowchart LR
 3. 将插件执行与 AI SDK 原生调用整合为统一流程。
 4. 文本、图像请求走统一生命周期，但图像模型会单独走图像模型解析与错误封装。
 
-## 2. models：模型解析
+## 2. models：模型类型与版本守卫
 
-入口文件：`packages/aiCore/src/core/models/ModelResolver.ts`
+入口文件：`packages/aiCore/src/core/models/`
 
-核心作用：
+当前模块已简化为模型类型守卫与配置类型：
 
-- 把 `modelId` 解析为可执行模型对象（语言、图像、Embedding）
-- 同时支持传统格式和命名空间格式
-- 对 OpenAI / Azure 的 chat mode 做 provider 级模式切换
+- `types.ts`：`ModelConfig<T, TSettingsMap>` 泛型接口，定义模型与 provider 设置的关联
+- `utils.ts`：`hasModelId()`、`isV2Model()`、`isV3Model()` 类型守卫函数
+- `index.ts`：导出上述类型和守卫
 
-当前内核侧实际覆盖的模型类型不止聊天模型，还包括：
+**注意**：旧版 `ModelResolver` 类已不再作为独立模块存在。模型解析职责已收敛到 Provider Extension 的 `resolveModel` 钩子和 `RuntimeExecutor.resolveModel()` 方法中。Executor 内部通过 `extensionRegistry.getModelResolver()` 获取 variant 级别的解析函数，或使用 AI SDK 注册表作为 fallback。
+
+当前内核侧实际覆盖的模型类型包括：
 
 - Language Model
 - Image Model
@@ -74,30 +76,362 @@ flowchart LR
 - 当前 `RegistryManagement` 使用 `|` 作为统一分隔符，而不是 `:`。
 - 这样做是为了避免和 provider 内部 suffix、兼容 API 标识冲突。
 
-## 3. providers：Provider 注册与实例化
+## 3. providers：基于 Extension 的注册体系
 
 核心文件：
 
-- `packages/aiCore/src/core/providers/RegistryManagement.ts`
-- `packages/aiCore/src/core/providers/HubProvider.ts`
+- `packages/aiCore/src/core/providers/core/ExtensionRegistry.ts` — 扩展注册中心与全局单例
+- `packages/aiCore/src/core/providers/core/ProviderExtension.ts` — Provider 实例化与 LRU 缓存
+- `packages/aiCore/src/core/providers/core/initialization.ts` — 17 个核心 Provider Extension 定义与自动注册
 
 核心能力：
 
-1. Provider 配置注册与动态实例化。
-2. 通过 `wrapProvider` 统一到 V3 规格。
-3. Hub 路由能力：一个 Hub 代理多个底层 Provider。
-4. Provider alias 管理：支持别名注册、真实 ID 反查、卸载时联动清理。
-5. Provider registry 生命周期管理：注册、注销、清空、重建。
+1. **Extension 注册**：每个 Extension 声明式定义 `baseId`、`aliases`、`variants`、`toolFactories`。模块加载时自动注册。
+2. **ProviderExtension 实例化**：LRU 缓存（max 10）+ pending promise map 防止并发重复创建。支持 `create` 函数和动态 `import` + `creatorFunctionName` 两种模式。
+3. **Variant 机制**：同一 Provider 可声明多个 variant（如 `openai-chat`、`openai-responses`、`azure-anthropic`），每个 variant 有独立的 `resolveModel` 函数和 `transform` 配置。
+4. **ToolFactory 机制**：Provider 可声明 `webSearch`、`urlContext`、`codeExecution`、`fileSearch` 等能力，通过 `resolveToolCapability()` 解析，支持 aggregator fallback。
+5. **alias 管理**：支持别名注册、真实 ID 反查。`parseProviderId()` 解析完整 ID 如 `openai-chat` 为 `{baseId: 'openai', mode: 'chat', isVariant: true}`。
 
-Hub 价值：
+当前 17 个核心 Extension：
 
-- 产品层只维护 Hub 接入点；
-- 实际请求在运行时按 `provider|modelId` 路由到底层实现。
+| Extension | Aliases | Variants | Tool Factories |
+|-----------|---------|----------|----------------|
+| Anthropic | `claude` | - | webSearch (`webSearch_20260209`), urlContext (`webFetch_20260209`) |
+| Azure | - | `responses`, `anthropic`（Azure 托管 Claude，带 `/anthropic/v1` 路径） | - |
+| CherryIn | - | `chat` | - |
+| DeepSeek | - | - | - |
+| Google | `google-ai`, `gemini`, `google-gemini` | - | webSearch, urlContext |
+| OpenAICompatible | - | - | - |
+| OpenAI | `openai-response` | `chat`（`resolveModel: provider.chat(modelId)`） | - |
+| OpenRouter | `tokenflux` | - | webSearch（传递 providerOptions） |
+| Xai | `grok` | `responses` | webSearch, xSearch |
 
-补充说明：
+以及渲染侧注册的 15+ 扩展：GoogleVertex、GoogleVertexAnthropic、GitHubCopilot、Bedrock、Perplexity、Mistral、HuggingFace、Gateway、Cerebras、Ollama、AiHubMix、NewAPI、Voyage、TogetherAI、Groq。
 
-- Hub Provider 不只代理语言模型，也代理 embedding / image / reranking / speech / transcription。
-- 因此 Hub 不只是“聊天模型聚合器”，而是更通用的模型路由层。
+**Variant 类型安全**：`ProviderVariant<TSettings, TProvider, TOutput>` 增加 `TOutput` 泛型，使 `transform` 输出类型流转到 `toolFactories` 和 `resolveModel`，修复了 azure-anthropic 的 `provider.tools.webSearchPreview is not a function` 问题（#14087）。
+
+## 3.1 贯穿全流程示例：用户添加 DashScope（通义千问）Provider
+
+以下例子追踪从用户在 UI 添加 Provider，到最终发起一次流式聊天的完整转化路径。每一层都展示了数据形态的变化。
+
+### 起点：用户在 UI 填入配置
+
+用户在设置页添加一个自定义 Provider：
+
+```
+类型: OpenAI Compatible
+名称: DashScope
+API Host: https://dashscope.aliyuncs.com/compatible-mode/v1
+API Key: sk-abc123...
+模型: qwen-max
+```
+
+对应 Redux store 中的 `Provider` 对象：
+
+```json
+{
+  "id": "dashscope",
+  "type": "openai",
+  "name": "DashScope",
+  "apiHost": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "apiKey": "sk-abc123...",
+  "models": [
+    { "id": "qwen-max", "name": "通义千问 Max", "provider": "openai" }
+  ]
+}
+```
+
+### 第一步：渲染侧 `getAiSdkProviderId()` — ID 映射
+
+用户选择 `qwen-max` 模型发送消息。渲染侧调用 `getAiSdkProviderId(provider)`：
+
+```typescript
+// src/renderer/src/aiCore/provider/factory.ts
+
+// provider.id = 'dashscope'，不在 appProviderIds 中
+// provider.type = 'openai'，不在 appProviderIds 中
+// apiHost 不包含 'api.openai.com'
+// → 返回 provider.id = 'dashscope'
+```
+
+因为 `dashscope` 不在预注册列表中，返回原始 ID。但 `provider.type = 'openai'` 标记了它使用 OpenAI 兼容协议。
+
+### 第二步：渲染侧 `providerToAiSdkConfig()` — 配置转换
+
+```typescript
+// src/renderer/src/aiCore/provider/providerConfig.ts
+
+const config: ProviderConfig = {
+  providerId: 'openai-compatible',     // type='openai' 但不是官方域名 → 走 openai-compatible
+  providerSettings: {
+    name: 'dashscope',
+    apiKey: 'sk-abc123...',
+    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    headers: { 'X-Client': 'CherryStudio' }
+  }
+}
+```
+
+关键转化：
+- `provider.id`（`dashscope`）→ `providerId`（`openai-compatible`）
+- `provider.apiHost` → `providerSettings.baseURL`
+- `provider.apiKey` → `providerSettings.apiKey`
+
+### 第三步：`AiProvider` 构造 — 适配与延迟初始化
+
+```typescript
+// src/renderer/src/aiCore/AiProvider.ts
+
+const model = { id: 'qwen-max', name: '通义千问 Max', provider: 'openai' }
+const ai = new AiProvider(model)
+
+// 内部执行：
+// 1. getActualProvider(model) → 从 store 获取完整的 Provider 对象
+// 2. adaptProvider({ provider, model }) → 克隆并格式化 API Host
+// 3. providerToAiSdkConfig() → 得到上面的 ProviderConfig
+// 4. config 可能是同步值或 Promise，先缓存
+```
+
+此时 `AiProvider` 只是持有配置，**还没有创建 AI SDK 实例**。创建是延迟的。
+
+### 第四步：`ApiService` → `buildStreamTextParams()` — 参数构建
+
+用户发送消息 `"你好"` 后，`ApiService.fetchChatCompletion()` 构建 AI SDK 参数：
+
+```typescript
+// src/renderer/src/aiCore/prepareParams/parameterBuilder.ts
+
+const params = {
+  messages: [
+    { role: 'user', content: '你好' }
+  ],
+  maxOutputTokens: 4096,
+  temperature: 0.7,
+  topP: 1,
+  maxRetries: 0,
+  tools: { /* MCP 工具 */ },
+  stopWhen: 'stepCountIs(8)'
+}
+
+const middlewareConfig = {
+  streamOutput: true,
+  enableWebSearch: false,
+  isSupportedToolUse: true,
+  isPromptToolUse: false,
+  mcpTools: [/* ... */],
+  topicId: 'topic_001',
+  assistant: { /* 完整助手配置 */ }
+}
+```
+
+### 第五步：`AiProvider.modernCompletions()` — 插件装配
+
+```typescript
+// src/renderer/src/aiCore/AiProvider.ts
+
+const plugins = buildPlugins({
+  provider: this.actualProvider,  // DashScope Provider
+  model: this.model,              // qwen-max
+  config: middlewareConfig
+})
+
+// 对于 openai-compatible + qwen-max，PluginBuilder 会装配：
+// 1. PdfCompatibilityPlugin（始终启用）
+// 2. ReasoningExtractionPlugin（provider type = openai，提取 <thinking> 标签）
+// 3. SearchOrchestrationPlugin（isSupportedToolUse = true）
+// 可能还有 QwenThinkingPlugin（如果是 Qwen3 模型且 provider 不支持 enable_thinking）
+```
+
+### 第六步：`createExecutor()` — 进入 aiCore
+
+```typescript
+// packages/aiCore/src/core/runtime/executor.ts
+// 调用方：AiProvider.modernCompletions()
+
+const executor = await createExecutor<AppProviderSettingsMap>(
+  'openai-compatible',                              // providerId
+  {                                                  // providerSettings
+    name: 'dashscope',
+    apiKey: 'sk-abc123...',
+    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    headers: { 'X-Client': 'CherryStudio' }
+  },
+  plugins  // 上一步构建的插件数组
+)
+```
+
+**`createExecutor` 内部做了什么**：
+
+```typescript
+// 1. 从 extensionRegistry 获取 Extension
+const extension = extensionRegistry.get('openai-compatible')
+// → 找到 OpenAICompatibleExtension
+
+// 2. 创建 PluginEngine
+const engine = new PluginEngine(providerId, plugins)
+
+// 3. 创建 RuntimeExecutor，内部持有 engine
+const executor = new RuntimeExecutor(providerSettings, engine)
+
+// 4. 返回 executor，此时仍未创建 AI SDK Provider 实例
+```
+
+### 第七步：`executor.streamText()` — 插件生命周期触发
+
+```typescript
+const streamResult = await executor.streamText({
+  ...params,           // messages, temperature, tools, etc.
+  model: 'qwen-max',
+  experimental_context: { onChunk: middlewareConfig.onChunk }
+})
+```
+
+**`streamText()` 内部的插件执行流程**：
+
+```
+1. PluginEngine.executeStreamWithPlugins()
+   │
+   ├─ configureContext  → 所有插件依次配置上下文
+   │   └─ telemetryPlugin 注入 tracer
+   │   └─ searchOrchestrationPlugin 注入 metadata
+   │
+   ├─ onRequestStart    → 并行执行
+   │   └─ telemetryPlugin 创建 OpenTelemetry span
+   │   └─ searchOrchestrationPlugin 发起意图分析（轻量 generateText）
+   │
+   ├─ resolveModel      → First 策略
+   │   └─ 默认解析：extensionRegistry.get('openai-compatible')
+   │      → createOpenAICompatible({ baseURL, apiKey, headers })
+   │      → 返回 OpenAICompatibleProvider 实例（写入 LRU cache）
+   │
+   ├─ transformParams   → 链式合并
+   │   └─ searchOrchestrationPlugin 注入 builtin_web_search 等工具
+   │
+   ├─ transformStream   → 收集所有 TransformStream
+   │   └─ promptToolUsePlugin 的工具调用流处理器（如果启用）
+   │
+   ├─ [AI SDK streamText()]  ← 实际发起 HTTP 请求
+   │   POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+   │   {
+   │     model: "qwen-max",
+   │     messages: [{ role: "user", content: "你好" }],
+   │     stream: true,
+   │     temperature: 0.7,
+   │     ...
+   │   }
+   │
+   └─ onRequestEnd      → 并行执行（流结束后）
+       └─ searchOrchestrationPlugin 触发记忆写回
+       └─ telemetryPlugin 结束 span
+```
+
+### 第八步：Provider 实例化的细节
+
+`resolveModel` 阶段，`OpenAICompatibleExtension` 被触发：
+
+```typescript
+// packages/aiCore/src/core/providers/core/initialization.ts
+
+const OpenAICompatibleExtension = ProviderExtension.create({
+  name: 'openai-compatible',
+  create: (settings) => {
+    if (!settings) {
+      throw new Error('OpenAI Compatible provider requires settings')
+    }
+    return createOpenAICompatible(settings)
+  }
+})
+```
+
+`ProviderExtension.createProvider()` 的执行：
+
+```typescript
+// 1. 合并 settings：defaultOptions ∪ 传入的 settings
+const mergedSettings = deepMergeObjects({}, {
+  name: 'dashscope',
+  apiKey: 'sk-abc123...',
+  baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  headers: { 'X-Client': 'CherryStudio' }
+})
+
+// 2. 计算稳定 hash
+const hash = stableStringify(mergedSettings)
+// → '{"apiKey":"sk-abc123...","baseURL":"...","headers":{"X-Client":"CherryStudio"},"name":"dashscope"}'
+
+// 3. 查 LRU cache → 未命中（首次）
+
+// 4. 调 create 函数
+const provider = createOpenAICompatible(mergedSettings)
+// → 返回 OpenAICompatibleProvider 实例
+
+// 5. 写入 LRU cache
+this.instances.set(hash, provider)
+```
+
+下次相同配置调用时，直接从 LRU cache 返回，不重复创建。
+
+### 第九步：AI SDK 返回流 → Chunk 适配
+
+DashScope 返回 SSE 流：
+
+```
+data: {"id":"chat-001","choices":[{"delta":{"role":"assistant"},"index":0}]}
+data: {"id":"chat-001","choices":[{"delta":{"content":"你"},"index":0}]}
+data: {"id":"chat-001","choices":[{"delta":{"content":"好"},"index":0}]}
+data: {"id":"chat-001","choices":[{"finish_reason":"stop"}]}
+```
+
+AI SDK 将其转为 `fullStream`（ReadableStream of TextStreamPart）：
+
+```
+{ type: 'text-start' }
+{ type: 'text-delta', text: '你' }
+{ type: 'text-delta', text: '好' }
+{ type: 'text-end', finishReason: 'stop', usage: { totalTokens: 50, ... } }
+{ type: 'finish', finishReason: 'stop' }
+```
+
+`AiSdkToChunkAdapter` 转换为 Cherry Studio Chunk：
+
+```
+{ type: 'TEXT_START' }
+{ type: 'TEXT_DELTA', text: '你' }
+{ type: 'TEXT_DELTA', text: '好' }
+{ type: 'TEXT_COMPLETE' }
+{ type: 'BLOCK_COMPLETE', response: { usage: { promptTokens: 30, completionTokens: 20 } } }
+```
+
+`StreamProcessingService` 分发到 UI，用户看到"你好"增量渲染完成。
+
+### 全流程数据变形总结
+
+```
+层                    输入                          输出
+────────────────────────────────────────────────────────────────
+用户填写             { 表单字段 }                   —
+────────────────────────────────────────────────────────────────
+Provider Object      { id, type, apiHost, apiKey }  Redux store 中的 Provider
+────────────────────────────────────────────────────────────────
+getAiSdkProviderId   Provider 对象                 'openai-compatible'（或原始 ID）
+────────────────────────────────────────────────────────────────
+providerToAiSdkConfig Provider + Model              { providerId, providerSettings }
+────────────────────────────────────────────────────────────────
+AiProvider 构造      providerSettings               持有配置（延迟初始化）
+────────────────────────────────────────────────────────────────
+buildStreamTextParams 消息 + 配置                   { messages, temperature, tools, ... }
+────────────────────────────────────────────────────────────────
+buildPlugins         provider + model + config      AiPlugin[] 数组
+────────────────────────────────────────────────────────────────
+createExecutor       providerId + settings + plugins RuntimeExecutor 实例
+────────────────────────────────────────────────────────────────
+resolveModel         providerSettings               OpenAICompatibleProvider（LRU 缓存）
+────────────────────────────────────────────────────────────────
+streamText           params + provider              AI SDK ReadableStream
+────────────────────────────────────────────────────────────────
+AiSdkToChunkAdapter  TextStreamPart[]               ChunkType[]
+────────────────────────────────────────────────────────────────
+UI 渲染              ChunkType[]                    可见文本
+```
 
 ## 4. plugins：插件生命周期
 
@@ -132,12 +466,18 @@ Hub 价值：
 
 ## 6. 错误模型
 
-核心错误在 `packages/aiCore/src/core/errors/` 与 runtime errors 中定义，如：
+核心错误在 `packages/aiCore/src/core/errors/` 与 runtime errors 中定义：
 
-- `ModelResolutionError`
-- `ProviderConfigError`
-- `PluginExecutionError`
-- `ImageGenerationError`
+| 错误类 | 触发场景 |
+|--------|---------|
+| `AiCoreError` | 所有 aiCore 错误的基类，提供 `toJSON()` 序列化 |
+| `RecursiveDepthError` | 插件递归调用超过最大深度（默认 10） |
+| `ModelResolutionError` | 模型 ID 无法解析为有效模型对象 |
+| `ParameterValidationError` | 参数校验失败 |
+| `PluginExecutionError` | 插件执行过程中抛出异常 |
+| `ProviderConfigError` | Provider 配置缺失或格式错误 |
+| `ImageGenerationError` | 图像生成失败 |
+| `TemplateLoadError` | 提示词模板加载失败 |
 
 作用是把底层异常转换为可诊断、可观测、可归因的错误类型。
 

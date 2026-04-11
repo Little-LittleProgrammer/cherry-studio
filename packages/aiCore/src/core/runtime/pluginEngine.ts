@@ -312,7 +312,11 @@ export class PluginEngine<T extends string = RegisteredProviderId> {
     const manager = new PluginManager<TParams, TResult>(this.basePlugins as AiPlugin<TParams, TResult>[])
 
     // ✅ 递归调用泛型化，增加深度限制
+    // 为什么递归调用：
+    // 允许在插件或流式处理中触发新的模型请求（如自动重试、补全中断内容、插入额外上下文等需要递归调用场景）。
+    // 保证嵌套层数有限制，防止无限递归。
     context.recursiveCall = async <R = TResult>(newParams: Partial<TParams>): Promise<R> => {
+      // 判断递归深度，防止无限递归
       if (context.recursiveDepth >= context.maxRecursiveDepth) {
         throw new RecursiveDepthError(context.requestId, context.recursiveDepth, context.maxRecursiveDepth)
       }
@@ -321,9 +325,11 @@ export class PluginEngine<T extends string = RegisteredProviderId> {
       const wasRecursive = context.isRecursiveCall
 
       try {
+        // 增加递归深度，标记为递归调用
         context.recursiveDepth = previousDepth + 1
         context.isRecursiveCall = true
 
+        // 递归调用主流程（可覆盖部分参数用于实现新的流式请求，如流式重试、接续响应等插件场景）
         return (await this.executeStreamWithPlugins(
           methodName,
           { ...params, ...newParams } as TParams,
@@ -331,7 +337,7 @@ export class PluginEngine<T extends string = RegisteredProviderId> {
           context
         )) as unknown as R
       } finally {
-        // ✅ finally 确保状态恢复
+        // finally 块确保递归状态恢复，避免影响父级调用
         context.recursiveDepth = previousDepth
         context.isRecursiveCall = wasRecursive
       }
@@ -365,29 +371,32 @@ export class PluginEngine<T extends string = RegisteredProviderId> {
         if (typeof resolvedModel === 'string') {
           throw new Error(`Model must be resolved before applying middlewares, got string: ${resolvedModel}`)
         }
+        // wrapLanguageModel 用于将一个 LanguageModelV3 实例和中间件数组组合，生成一个应用了所有中间件的新模型实例
+        // 这样后续的 API 调用会经过 context.middlewares 中注册的中间件处理
         resolvedModel = wrapLanguageModel({
           model: resolvedModel as LanguageModelV3,
           middleware: context.middlewares
         })
       }
 
-      // 3. 转换请求参数
+      // 3. 转换请求参数 - transformParams
       const transformedParams = await manager.executeTransformParams(params, context)
 
-      // 4. 收集流转换器
+      // 4. 收集流转换器 - transformStream
       const streamTransforms = manager.collectStreamTransforms(transformedParams, context)
 
-      // 5. 执行流式 API 调用
+      // 5. 执行流式 API 调用 - executor
       const result = executor(resolvedModel, transformedParams, streamTransforms)
 
+      // 6. 转换结果 - transformResult
       const transformedResult = await manager.executeTransformResult(result, context)
 
-      // 6. 触发完成事件（注意：对于流式调用，这里触发的是开始流式响应的事件）
+      // 7. 触发完成事件（注意：对于流式调用，这里触发的是开始流式响应的事件）
       await manager.executeParallel('onRequestEnd', context, transformedResult)
 
       return transformedResult
     } catch (error) {
-      // 7. 触发错误事件
+      // 8. 触发错误事件
       await manager.executeParallel('onError', context, undefined, error as Error)
       throw error
     }
