@@ -22,11 +22,11 @@ import { RuntimeExecutor } from './executor'
  */
 /**
  * 创建并返回一个 RuntimeExecutor 执行器实例。
- * 
+ *
  * 执行器（Executor）是运行时的核心组件，负责将已初始化的 AI Provider（如 OpenAI、Azure 等）
  * 及其中间件插件、模型解析逻辑等组装在一起，并通过标准接口对外暴露 AI 调用能力。
  * 执行器屏蔽了底层 Provider 细节，使得上层可以以统一方式进行文本生成、图像生成等任务。
- * 
+ *
  * @param providerId 指定的 Provider 扩展 ID
  * @param options    对应 Provider 需要的配置参数
  * @param plugins    可选插件列表，会注入到执行器中参与调用流程
@@ -35,11 +35,7 @@ import { RuntimeExecutor } from './executor'
 export async function createExecutor<
   TSettingsMap extends Record<string, any> = CoreProviderSettingsMap,
   T extends StringKeys<TSettingsMap> = StringKeys<TSettingsMap>
->(
-  providerId: T,
-  options: TSettingsMap[T],
-  plugins?: AiPlugin[]
-): Promise<RuntimeExecutor<TSettingsMap, T>> {
+>(providerId: T, options: TSettingsMap[T], plugins?: AiPlugin[]): Promise<RuntimeExecutor<TSettingsMap, T>> {
   // 检查 provider 是否已被注册
   if (!extensionRegistry.has(providerId)) {
     throw new Error(`Provider extension "${providerId}" not registered`)

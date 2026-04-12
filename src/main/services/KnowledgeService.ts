@@ -234,39 +234,64 @@ class KnowledgeService {
     logger.info(`Startup cleanup completed: ${deletedCount}/${pendingDeleteIds.length} knowledge bases deleted`)
   }
 
+  /**
+   * 获取（或创建）RAGApplication 实例的方法。该方法会详细讲解每一步的作用。
+   *
+   * @param id               知识库的唯一标识
+   * @param embedApiClient   向量嵌入API客户端，用于文本向量化
+   * @param dimensions       向量维度
+   * @param documentCount    检索返回的文档数量
+   * @returns                对应的 RAGApplication 实例（若已存在则复用，否则新建）
+   */
   private getRagApplication = async ({
     id,
     embedApiClient,
     dimensions,
     documentCount
   }: KnowledgeBaseParams): Promise<RAGApplication> => {
+    // 1. 检查指定 id 的 RAGApplication 是否已存在于内存中。若存在则直接返回，避免重复创建。
     if (this.ragApplications.has(id)) {
-      return this.ragApplications.get(id)!
+      return this.ragApplications.get(id)! // 如果已存在，直接返回
     }
 
     let ragApplication: RAGApplication
+    // 2. 创建 Embeddings 实例，用于后续文本转向量操作。需传入相关配置参数。
     const embeddings = new Embeddings({
       embedApiClient,
       dimensions
     })
+
     try {
+      // 3. 通过 id 获取对应数据库文件路径
       const dbPath = this.getDbPath(id)
+      // 4. 创建 LibSqlDb 实例（本地向量数据库），用于向量存储和检索
       const libSqlDb = new LibSqlDb({ path: dbPath })
-      // Save database instance for later closing
+      // 5. 保存数据库实例引用，方便后续关闭资源等操作
       this.dbInstances.set(id, libSqlDb)
 
+      // 6. 通过 RAGApplicationBuilder 构建 RAGApplication 实例
+
       ragApplication = await new RAGApplicationBuilder()
+        // 设置模型（这里为 'NO_MODEL'，仅用于检索，不做生成）
         .setModel('NO_MODEL')
+        // 配置嵌入模型
         .setEmbeddingModel(embeddings)
+        // 配置向量数据库
         .setVectorDatabase(libSqlDb)
+        // 设置检索时返回的文档数量（默认30）
         .setSearchResultCount(documentCount || 30)
+        // 完成实例的构建
         .build()
+
+      // 7. 将新创建的 RAGApplication 保存到内存中，便于后续复用
       this.ragApplications.set(id, ragApplication)
     } catch (e) {
+      // 8. 构建过程中可能出错，这里记录具体错误并抛出
       logger.error('Failed to create RAGApplication:', e as Error)
       throw new Error(`Failed to create RAGApplication: ${e}`)
     }
 
+    // 9. 返回最终的 RAGApplication 实例
     return ragApplication
   }
 

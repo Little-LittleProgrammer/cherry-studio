@@ -138,6 +138,11 @@ export const getKnowledgeSourceUrl = async (item: KnowledgeSearchResult & { file
   return item.metadata.source
 }
 
+/**
+ * searchKnowledgeBase
+ * 从字符串query转换成向量（Embedding），再据此检索知识库。
+ * 如果KnowledgeBase有设置rerank模型，则对初步搜索结果进行重排序（rerank）。
+ */
 export const searchKnowledgeBase = async (
   query: string,
   base: KnowledgeBase,
@@ -146,7 +151,7 @@ export const searchKnowledgeBase = async (
   parentSpanId?: string,
   modelName?: string
 ): Promise<Array<KnowledgeSearchResult & { file: FileMetadata | null }>> => {
-  // Truncate query based on embedding model's max_context to prevent embedding errors
+  // 1. 限制query的长度，避免嵌入模型的最大上下文限制被超出（防止embedding报错）
   const maxContext = getEmbeddingMaxContext(base.model.id)
   if (maxContext) {
     const estimatedTokens = estimateTextTokens(query)
@@ -157,11 +162,13 @@ export const searchKnowledgeBase = async (
   }
 
   let currentSpan: Span | undefined = undefined
+
   try {
     const baseParams = getKnowledgeBaseParams(base)
     const documentCount = base.documentCount || DEFAULT_KNOWLEDGE_DOCUMENT_COUNT
     const threshold = base.threshold || DEFAULT_KNOWLEDGE_THRESHOLD
 
+    // 跟踪一个Span过程，便于链路追踪或分析
     if (topicId) {
       currentSpan = addSpan({
         topicId,
@@ -177,6 +184,8 @@ export const searchKnowledgeBase = async (
       })
     }
 
+    // 2. 字符串转换成向量 & 检索召回
+    //    后端实际是把search这个字符串做embedding转为向量，然后与知识库内存储的向量做相似度检索，返回召回结果
     const searchResults: KnowledgeSearchResult[] = await window.api.knowledgeBase.search(
       {
         search: query || rewrite || '',
@@ -185,10 +194,11 @@ export const searchKnowledgeBase = async (
       currentSpan?.spanContext()
     )
 
-    // 过滤阈值不达标的结果
+    // 3. 用阈值过滤掉得分较低的召回结果
     const filteredResults = searchResults.filter((item) => item.score >= threshold)
 
-    // 如果有rerank模型，执行重排
+    // 4. 是否需要重排序（Rerank）
+    //    rerank模型通常是一种更强的模型（比如cross-encoder），能结合query和召回文本再次打分做更优的排序
     let rerankResults = filteredResults
     if (base.rerankModel && filteredResults.length > 0) {
       rerankResults = await window.api.knowledgeBase.rerank(
@@ -201,10 +211,10 @@ export const searchKnowledgeBase = async (
       )
     }
 
-    // 限制文档数量
+    // 5. 最终只返回限定数量的结果（数量受documentCount配置限制）
     const limitedResults = rerankResults.slice(0, documentCount)
 
-    // 处理文件信息
+    // 6. 补充文件（source）信息，方便后续展示
     const result = await Promise.all(
       limitedResults.map(async (item) => {
         const file = await getFileFromUrl(item.metadata.source)
@@ -212,6 +222,7 @@ export const searchKnowledgeBase = async (
         return { ...item, file }
       })
     )
+
     if (topicId) {
       endSpan({
         topicId,
@@ -220,6 +231,7 @@ export const searchKnowledgeBase = async (
         modelName
       })
     }
+
     return result
   } catch (error) {
     logger.error(`Error searching knowledge base ${base.name}:`, error as Error)
@@ -260,6 +272,8 @@ export const processKnowledgeSearch = async (
     return []
   }
 
+  // span 是一个用于追踪和记录操作过程的“追踪单元”对象，通常用于监控和分析请求链路（比如性能分析、日志关联等）。
+  // 在这里，addSpan 用于创建一个新的 span，标记“knowledgeSearch”这一步骤的开始和相关输入，便于后续统计和调试。
   const span = addSpan({
     topicId,
     name: 'knowledgeSearch',
