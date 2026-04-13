@@ -254,55 +254,84 @@ class McpService {
     return this.serverLogs.get(this.getServerKey(server))
   }
 
+  /**
+   * 初始化并返回给定 MCPServer 的 Client 实例。
+   *
+   * 此函数的主要作用是为指定的 server 配置初始化客户端连接，支持内存、本地进程以及 HTTP 等多种不同 transport。
+   * 它还会确保同一配置的 server 只会对应一个活跃的客户端实例（通过缓存和 pending promise）。
+   *
+   * 详细步骤说明：
+   * 1. 生成 serverKey，作为此 server 配置的全局唯一标识。
+   * 2. 检查是否有正在初始化的 client（pendingClients），如果有，直接等待该 promise 返回，避免重复创建。
+   * 3. 查看当前是否已存在并可用的 client（clients 缓存）。有则发起 ping 校验其可用性，ping 失败则废弃该 client。
+   * 4. 准备 headers 工具函数，用于后续 HTTP 请求头拼接。
+   * 5. 真正进入初始化流程，组装初始化 promise，期间：
+   *    - 创建新的 Client 实例。
+   *    - 复制 server.args，以便后面可能会有变更。
+   *    - 配置 OAuth 的授权客户端 provider（McpOAuthClientProvider 实例）。
+   *    - 核心：调用 initTransport() 决定并初始化本次 client 的通信方式（process/stdio、in-memory、HTTP 等）。
+   *      - a. 若是内置 memory-server 且 server 名称特殊（nowledgeMem, flomo），则以 HTTP transport 连接（StreamableHTTPClientTransport）。
+   *      - b. 若是内置 server（非 mcpAutoInstall），用内存 client+server 对，即 InMemoryTransport。
+   *      - c. 已配置 baseUrl，根据 server.type 分别用 HTTP 长连接或 SSE 事件源等。
+   *      - d. 若 server 提供命令行(command)，说明需要本地起进程（StdioClientTransport）。此时可能还要做 DXT 路径解析、npx/bun/uv 等特殊处理。
+   *    - 若为进程型（command），会判断 npx、bun、uvx、uv 和注册表等细节：如优先寻找系统命令，找不到再回退到捆绑二进制，必要时改写启动参数与环境变量。
+   *    - 最终，构建好合适的 transport 并返回。
+   * 6. 客户端初次连接可能会遇到需要授权的情况（UnauthorizedError）。
+   *    - 遇到时，会走 handleAuth() 方法，启动本地 OAuth 回调服务，等待用户完成授权后，用获得的 code 调用传参给 transport 完成授权，再自动重连。
+   * 7. 连接时加 Promise.race 超时控制，确保连接时长有限，避免挂死。
+   * 8. 连接建立后，写入客户端缓存、通知日志、挂载各类通知处理器，并清理老缓存（确保数据新鲜）。
+   * 9. 若出错，记录 error 日志并携带脱敏后的详细信息，便于定位问题。
+   * 10. 不论成功失败，最终都会移除 pendingClients 状态。
+   *
+   * 使用举例：
+   * const client = await mcpService.initClient(myServer);
+   */
   async initClient(server: MCPServer): Promise<Client> {
+    // 1. 生成唯一 server key 用于识别不同 server 配置
     const serverKey = this.getServerKey(server)
 
-    // If there's a pending initialization, wait for it
+    // 2. 检查是否正在初始化 client，避免重复请求
     const pendingClient = this.pendingClients.get(serverKey)
     if (pendingClient) {
-      getServerLogger(server).silly(`Waiting for pending client initialization`)
+      getServerLogger(server).silly('等待已有的 client 初始化完成')
       return pendingClient
     }
 
-    // Check if we already have a client for this server configuration
+    // 3. 检查缓存 client 是否可用（通过 ping 验证）
     const existingClient = this.clients.get(serverKey)
     if (existingClient) {
       try {
-        // Check if the existing client is still connected
-        const pingResult = await existingClient.ping({
-          // add short timeout to prevent hanging
-          timeout: 1000
-        })
-        getServerLogger(server).debug(`Ping result`, { ok: !!pingResult })
-        // If the ping fails, remove the client from the cache
-        // and create a new one
+        // 发送 ping 检查连接
+        const pingResult = await existingClient.ping({ timeout: 1000 })
+        getServerLogger(server).debug('ping 结果', { ok: !!pingResult })
+        // ping 不通即删缓存，否者复用
         if (!pingResult) {
           this.clients.delete(serverKey)
         } else {
           return existingClient
         }
       } catch (error: any) {
-        getServerLogger(server).error(`Error pinging server ${server.name}`, error as Error)
+        getServerLogger(server).error(`ping 检查 server 失败: ${server.name}`, error as Error)
         this.clients.delete(serverKey)
       }
     }
 
-    const prepareHeaders = () => {
-      return {
-        ...defaultAppHeaders(),
-        ...server.headers
-      }
-    }
+    // 4. 工具函数：合成 HTTP 请求头（基础头+server 配置头）
+    const prepareHeaders = () => ({
+      ...defaultAppHeaders(),
+      ...server.headers
+    })
 
-    // Create a promise for the initialization process
+    // 5. 用 promise 包装初始化流程，实际仅在必要时走一次
     const initPromise = (async () => {
       try {
-        // Create new client instance for each connection
+        // 创建新的 RPC 客户端（与 MCP server 通信）
         const client = new Client({ name: 'Cherry Studio', version: app.getVersion() }, { capabilities: {} })
 
+        // 防御性地克隆 server.args，后续可能变化
         let args = [...(server.args || [])]
 
-        // let transport: StdioClientTransport | SSEClientTransport | InMemoryTransport | StreamableHTTPClientTransport
+        // 准备 OAuth 授权流程 provider（如需要登录认证）
         const authProvider = new McpOAuthClientProvider({
           serverUrlHash: crypto
             .createHash('md5')
@@ -310,12 +339,14 @@ class McpService {
             .digest('hex')
         })
 
+        /**
+         * 具体初始化 transport 的函数。
+         * 按 server 配置实际类型分支（内存、二进制进程、http/sse）。
+         */
         const initTransport = async (): Promise<
           StdioClientTransport | SSEClientTransport | InMemoryTransport | StreamableHTTPClientTransport
         > => {
-          // Create appropriate transport based on configuration
-
-          // Special case for nowledgeMem and flomo - uses HTTP transport instead of in-memory
+          // 内置 nowledgeMem 和 flomo 特殊处理走 HTTP
           if (
             isBuiltinMCPServer(server) &&
             (server.name === BuiltinMCPServerNames.nowledgeMem || server.name === BuiltinMCPServerNames.flomo)
@@ -326,9 +357,7 @@ class McpService {
             }
             const httpUrl = httpUrlMap[server.name]
             const options: StreamableHTTPClientTransportOptions = {
-              fetch: async (url, init) => {
-                return net.fetch(typeof url === 'string' ? url : url.toString(), init)
-              },
+              fetch: async (url, init) => net.fetch(typeof url === 'string' ? url : url.toString(), init),
               requestInit: {
                 headers: {
                   ...defaultAppHeaders(),
@@ -337,46 +366,42 @@ class McpService {
               },
               authProvider
             }
-            getServerLogger(server).debug(`Using StreamableHTTPClientTransport for ${server.name}`)
+            getServerLogger(server).debug(`使用 StreamableHTTPClientTransport 连接 ${server.name}`)
             return new StreamableHTTPClientTransport(new URL(httpUrl), options)
           }
 
+          // 内存型 server（如 mcp 内置插件）
           if (isBuiltinMCPServer(server) && server.name !== BuiltinMCPServerNames.mcpAutoInstall) {
-            getServerLogger(server).debug(`Using in-memory transport`)
+            getServerLogger(server).debug('使用 InMemoryTransport 内存通道')
             const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
-            // start the in-memory server with the given name and environment variables
+            // 启动内存 server（支持插件能力）
             const inMemoryServer = createInMemoryMCPServer(server.name, args, server.env || {})
             try {
               await inMemoryServer.connect(serverTransport)
-              getServerLogger(server).debug(`In-memory server started`)
+              getServerLogger(server).debug('内存 server 启动完成')
             } catch (error: any) {
-              getServerLogger(server).error(`Error starting in-memory server`, error as Error)
-              throw new Error(`Failed to start in-memory server: ${error.message}`)
+              getServerLogger(server).error('启动内存 server 失败', error as Error)
+              throw new Error(`启动内存 server 失败: ${error.message}`)
             }
-            // set the client transport to the client
             return clientTransport
           } else if (server.baseUrl) {
+            // HTTP 直连型 server
             if (server.type === 'streamableHttp') {
               const options: StreamableHTTPClientTransportOptions = {
-                fetch: async (url, init) => {
-                  return net.fetch(typeof url === 'string' ? url : url.toString(), init)
-                },
+                fetch: async (url, init) => net.fetch(typeof url === 'string' ? url : url.toString(), init),
                 requestInit: {
                   headers: prepareHeaders()
                 },
                 authProvider
               }
-              // redact headers before logging
-              getServerLogger(server).debug(`StreamableHTTPClientTransport options`, {
+              getServerLogger(server).debug('StreamableHTTPClientTransport 配置', {
                 options: redactSensitive(options)
               })
               return new StreamableHTTPClientTransport(new URL(server.baseUrl), options)
             } else if (server.type === 'sse') {
               const options: SSEClientTransportOptions = {
                 eventSourceInit: {
-                  fetch: async (url, init) => {
-                    return net.fetch(typeof url === 'string' ? url : url.toString(), init)
-                  }
+                  fetch: async (url, init) => net.fetch(typeof url === 'string' ? url : url.toString(), init)
                 },
                 requestInit: {
                   headers: prepareHeaders()
@@ -385,82 +410,62 @@ class McpService {
               }
               return new SSEClientTransport(new URL(server.baseUrl), options)
             } else {
-              throw new Error('Invalid server type')
+              throw new Error('未知的 server.type')
             }
           } else if (server.command) {
+            /**
+             * 本地可执行命令型 server 启动逻辑
+             * 可能采用 npx、bun、uvx、uv 或 manifest 配置等
+             */
             let cmd = server.command
 
-            // Get login shell environment first - needed for command detection and server execution
-            // Note: getLoginShellEnvironment() is memoized, so subsequent calls are fast
+            // 确认 shell 环境变量（用于后续查找命令、拼接执行环境）
             const loginShellEnv = await getLoginShellEnvironment()
 
-            // For DXT servers, use resolved configuration with platform overrides and variable substitution
+            // DXT 路径支持，优先尝试 manifest 中解析后的配置
             if (server.dxtPath) {
               const resolvedConfig = this.dxtService.getResolvedMcpConfig(server.dxtPath)
               if (resolvedConfig) {
                 cmd = resolvedConfig.command
                 args = resolvedConfig.args
-                // Merge resolved environment variables with existing ones
                 server.env = {
                   ...server.env,
                   ...resolvedConfig.env
                 }
-                getServerLogger(server).debug(`Using resolved DXT config`, {
-                  command: cmd,
-                  args
-                })
+                getServerLogger(server).debug('使用 DXT 解析后的命令及参数', { command: cmd, args })
               } else {
-                getServerLogger(server).warn(`Failed to resolve DXT config, falling back to manifest values`)
+                getServerLogger(server).warn('DXT config 解析失败，回退到 manifest 配置')
               }
             }
 
+            // 特殊命令 npx 的处理（涉及 fallback 到 bun）
             if (server.command === 'npx') {
-              // First, check if npx is available in user's shell environment
               const npxPath = await findCommandInShellEnv('npx', loginShellEnv)
-
               if (npxPath) {
-                // Use system npx
+                // 优先使用系统 npx
                 cmd = npxPath
-                getServerLogger(server).debug(`Using system npx`, { command: cmd })
+                getServerLogger(server).debug('使用本地 npx', { command: cmd })
               } else {
-                // System npx not found, try bundled bun as fallback
-                getServerLogger(server).debug(`System npx not found, checking for bundled bun`)
-
+                // 没有 npx，尝试用捆绑的 bun
+                getServerLogger(server).debug('系统未找到 npx，尝试 fallback 到 bun')
                 if (await isBinaryExists('bun')) {
-                  // Fall back to bundled bun
                   cmd = await getBinaryPath('bun')
-                  getServerLogger(server).info(`Using bundled bun as fallback (npx not found in PATH)`, {
-                    command: cmd
-                  })
-
-                  // Transform args for bun x format
+                  getServerLogger(server).info('npx 不在 PATH，使用捆绑的 bun 作为 x', { command: cmd })
+                  // bun x 需要前置参数
                   if (args && args.length > 0) {
-                    if (!args.includes('-y')) {
-                      args.unshift('-y')
-                    }
-                    if (!args.includes('x')) {
-                      args.unshift('x')
-                    }
+                    if (!args.includes('-y')) args.unshift('-y')
+                    if (!args.includes('x')) args.unshift('x')
                   }
                 } else {
-                  // Neither npx nor bun available
-                  throw new Error(
-                    'npx not found in PATH and bundled bun is not available. This may indicate an installation issue.\n' +
-                      'Please either:\n' +
-                      '1. Install Node.js (which includes npx) from https://nodejs.org\n' +
-                      '2. Run the MCP dependencies installer from Settings\n' +
-                      '3. Restart the application if you recently installed Node.js'
-                  )
+                  throw new Error('系统未装 npx 且未检测到 bun。安装 nodejs 或使用设置里的依赖安装器修复。')
                 }
               }
-
               if (server.registryUrl) {
                 server.env = {
                   ...server.env,
                   NPM_CONFIG_REGISTRY: server.registryUrl
                 }
-
-                // if the server name is mcp-auto-install, use the mcp-registry.json file in the bin directory
+                // mcp-auto-install 特殊注册表文件
                 if (server.name.includes('mcp-auto-install')) {
                   const binPath = await getBinaryPath()
                   makeSureDirExists(binPath)
@@ -468,35 +473,23 @@ class McpService {
                 }
               }
             } else if (server.command === 'uvx' || server.command === 'uv') {
-              // First, check if uvx/uv is available in user's shell environment
+              // uvx/uv 命令的查找与回退
               const uvPath = await findCommandInShellEnv(server.command, loginShellEnv)
-
               if (uvPath) {
-                // Use system uvx/uv
                 cmd = uvPath
-                getServerLogger(server).debug(`Using system ${server.command}`, { command: cmd })
+                getServerLogger(server).debug(`优先使用系统 ${server.command}`, { command: cmd })
               } else {
-                // System command not found, try bundled version as fallback
-                getServerLogger(server).debug(`System ${server.command} not found, checking for bundled version`)
-
+                getServerLogger(server).debug(`系统未找到 ${server.command}，尝试使用捆绑二进制`)
                 if (await isBinaryExists(server.command)) {
-                  // Fall back to bundled version
                   cmd = await getBinaryPath(server.command)
-                  getServerLogger(server).info(`Using bundled ${server.command} as fallback (not found in PATH)`, {
-                    command: cmd
-                  })
+                  getServerLogger(server).info(`PATH 中未找到，使用捆绑的 ${server.command}`, { command: cmd })
                 } else {
-                  // Neither system nor bundled available
                   throw new Error(
-                    `${server.command} not found in PATH and bundled version is not available. This may indicate an installation issue.\n` +
-                      'Please either:\n' +
-                      '1. Install uv from https://github.com/astral-sh/uv\n' +
-                      '2. Run the MCP dependencies installer from Settings\n' +
-                      `3. Restart the application if you recently installed ${server.command}`
+                    `${server.command} 未安装且无捆绑二进制。请安装 uv：https://github.com/astral-sh/uv 或用依赖管理器修复。`
                   )
                 }
               }
-
+              // registry 配置同步给 uv
               if (server.registryUrl) {
                 server.env = {
                   ...server.env,
@@ -506,9 +499,9 @@ class McpService {
               }
             }
 
-            getServerLogger(server).debug(`Starting server`, { command: cmd, args })
+            getServerLogger(server).debug('准备启动本地进程 server', { command: cmd, args })
 
-            // Bun not support proxy https://github.com/oven-sh/bun/issues/16812
+            // bun 缺失 proxy 环境变量兼容，提前处理
             if (cmd.includes('bun')) {
               removeEnvProxy(loginShellEnv)
             }
@@ -516,17 +509,14 @@ class McpService {
             const transportOptions: StdioServerParameters = {
               command: cmd,
               args,
-              env: {
-                ...loginShellEnv,
-                ...server.env
-              },
-              stderr: 'pipe'
+              env: { ...loginShellEnv, ...server.env },
+              stderr: 'pipe' as const
             }
 
-            // For DXT servers, set the working directory to the extracted path
+            // DXT 配置优先 cwd
             if (server.dxtPath) {
               transportOptions.cwd = server.dxtPath
-              getServerLogger(server).debug(`Setting working directory for DXT server`, {
+              getServerLogger(server).debug('为 DXT server 指定 working directory', {
                 cwd: server.dxtPath
               })
             }
@@ -534,7 +524,7 @@ class McpService {
             const stdioTransport = new StdioClientTransport(transportOptions)
             stdioTransport.stderr?.on('data', (data) => {
               const msg = data.toString()
-              getServerLogger(server).debug(`Stdio stderr`, { data: msg })
+              getServerLogger(server).debug('Stdio stderr', { data: msg })
               this.emitServerLog(server, {
                 timestamp: Date.now(),
                 level: 'stderr',
@@ -542,70 +532,64 @@ class McpService {
                 source: 'stdio'
               })
             })
-            // StdioClientTransport does not expose stdout as a readable stream for raw logging
-            // (stdout is reserved for JSON-RPC). Avoid attaching a listener that would never fire.
+            // stdout 为专用 JSON-RPC，未开放日志订阅
             return stdioTransport
           } else {
-            throw new Error('Either baseUrl or command must be provided')
+            throw new Error('必须提供 baseUrl 或 command 才能初始化 client')
           }
         }
 
+        /**
+         * 处理 OAuth 授权，需要本地开启回调 server，
+         * 获取 code 后调用 transport 完成认证并重新连接。
+         */
         const handleAuth = async (client: Client, transport: SSEClientTransport | StreamableHTTPClientTransport) => {
-          getServerLogger(server).debug(`Starting OAuth flow`)
-          // Create an event emitter for the OAuth callback
+          getServerLogger(server).debug('OAuth 流程启动')
           const events = new EventEmitter()
-
-          // Create a callback server
           const callbackServer = new CallBackServer({
             port: authProvider.config.callbackPort,
             path: authProvider.config.callbackPath || '/oauth/callback',
             events
           })
-
-          // Set a timeout to close the callback server
           const timeoutId = setTimeout(() => {
-            getServerLogger(server).warn(`OAuth flow timed out`)
+            getServerLogger(server).warn('OAuth 超时，回收本地回调服务')
             void callbackServer.close()
-          }, 300000) // 5 minutes timeout
-
+          }, 300000) // 5 分钟超时
           try {
-            // Wait for the authorization code
+            // 等待 code
             const authCode = await callbackServer.waitForAuthCode()
-            getServerLogger(server).debug(`Received auth code`)
-
-            // Complete the OAuth flow
+            getServerLogger(server).debug('收到认证 code')
+            // 完成 OAuth 流程
             await transport.finishAuth(authCode)
-
-            getServerLogger(server).debug(`OAuth flow completed`)
-
+            getServerLogger(server).debug('OAuth 完成，重连')
             const newTransport = await initTransport()
-            // Try to connect again
             await client.connect(newTransport)
-
-            getServerLogger(server).debug(`Successfully authenticated`)
+            getServerLogger(server).debug('认证后成功建立连接')
           } catch (oauthError) {
-            getServerLogger(server).error(`OAuth authentication failed`, oauthError as Error)
-            throw new Error(
-              `OAuth authentication failed: ${oauthError instanceof Error ? oauthError.message : String(oauthError)}`
-            )
+            getServerLogger(server).error('OAuth 认证失败', oauthError as Error)
+            throw new Error(`OAuth 认证失败: ${oauthError instanceof Error ? oauthError.message : String(oauthError)}`)
           } finally {
-            // Clear the timeout and close the callback server
             clearTimeout(timeoutId)
             void callbackServer.close()
           }
         }
 
+        /**
+         * 总流程控制，包括连接和异常处理，以及超时保护
+         */
         try {
+          // 包一层 timeout 连接
           const connectWithTimeout = async () => {
             const transport = await initTransport()
             try {
               await client.connect(transport)
             } catch (error: any) {
+              // 检测是否需要授权
               if (
                 error instanceof Error &&
                 (error.name === 'UnauthorizedError' || error.message.includes('Unauthorized'))
               ) {
-                logger.debug(`Authentication required for server: ${server.name}`)
+                logger.debug(`检测到 ${server.name} 需要认证，进入认证流程`)
                 await handleAuth(client, transport as SSEClientTransport | StreamableHTTPClientTransport)
               } else {
                 throw error
@@ -617,7 +601,7 @@ class McpService {
             connectWithTimeout(),
             new Promise<never>((_, reject) =>
               setTimeout(
-                () => reject(new Error(`Connection timed out after ${MCP_CONNECTION_TIMEOUT_MS / 1000}s`)),
+                () => reject(new Error(`连接超时：${MCP_CONNECTION_TIMEOUT_MS / 1000}秒`)),
                 MCP_CONNECTION_TIMEOUT_MS
               )
             )
@@ -626,47 +610,48 @@ class McpService {
           this.emitServerLog(server, {
             timestamp: Date.now(),
             level: 'info',
-            message: 'Server connected',
+            message: 'server 已连接',
             source: 'client'
           })
 
-          // Store the new client in the cache
+          // 存入 client 缓存，下次如未失效直接复用
           this.clients.set(serverKey, client)
 
-          // Set up notification handlers
+          // 挂载通知/推送处理回调
           this.setupNotificationHandlers(client, server)
 
-          // Clear existing cache to ensure fresh data
+          // 清理相关缓存，让 caller 总是能拿到最新 server 数据
           this.clearServerCache(serverKey)
 
-          logger.debug(`Activated server: ${server.name}`)
+          logger.debug(`server 激活完成: ${server.name}`)
           this.emitServerLog(server, {
             timestamp: Date.now(),
             level: 'info',
-            message: 'Server activated',
+            message: 'server 已激活',
             source: 'client'
           })
           return client
         } catch (error) {
-          getServerLogger(server).error(`Error activating server ${server.name}`, error as Error)
+          getServerLogger(server).error(`server ${server.name} 激活异常`, error as Error)
           this.emitServerLog(server, {
             timestamp: Date.now(),
             level: 'error',
-            message: `Error activating server: ${(error as Error)?.message}`,
+            message: `server 激活异常: ${(error as Error)?.message}`,
             data: redactSensitive(error),
             source: 'client'
           })
           throw error
         }
       } finally {
-        // Clean up the pending promise when done
+        // 不论成功失败都确保清理 pending 状态
         this.pendingClients.delete(serverKey)
       }
     })()
 
-    // Store the pending promise
+    // 标记当前已有正在初始化的 client promise，防重复
     this.pendingClients.set(serverKey, initPromise)
 
+    // 返回 client（如果并发，后续直接 await pendingPromise）
     return initPromise
   }
 
@@ -906,21 +891,35 @@ class McpService {
   }
 
   /**
-   * Call a tool on an MCP server
+   * 调用 MCP 服务器上的工具（详细解释版）
+   *
+   * 该方法用于在指定的 MCP 服务器上调用一个工具。它处理了参数预处理、进度跟踪、超时、异常日志和清理等操作，保证调用过程既健壮又有详细日志。
+   *
+   * @param _ - Electron 的 IPC 事件，占位参数，这里未使用
+   * @param param1 - 调用参数，包括 server（服务器信息）、name（工具名）、args（工具参数）、callId（调用ID，可选）
+   * @returns Promise<MCPCallToolResponse> 工具调用的响应结果
    */
   public async callTool(
     _: Electron.IpcMainInvokeEvent,
     { server, name, args, callId }: CallToolArgs
   ): Promise<MCPCallToolResponse> {
+    // 1. 确定本次调用的唯一 callId，如果没有传入则用 uuid 自动生成
     const toolCallId = callId || uuidv4()
+
+    // 2. 为本次调用创建一个 AbortController，实现取消的能力，并注册到 activeToolCalls
     const abortController = new AbortController()
     this.activeToolCalls.set(toolCallId, abortController)
 
+    // 3. 定义实际的工具调用逻辑的函数
     const callToolFunc = async ({ server, name, args }: CallToolArgs) => {
       try {
-        getServerLogger(server, { tool: name, callId: toolCallId }).debug(`Calling tool`, {
+        // a. 记录调试日志，展示调用信息，对敏感数据做脱敏
+        getServerLogger(server, { tool: name, callId: toolCallId }).debug('Calling tool', {
           args: redactSensitive(args)
         })
+
+        // b. 参数解析：
+        // 如果参数 args 是字符串，则尝试将其解析为对象。如果解析失败，记录解析错误日志。
         if (typeof args === 'string') {
           try {
             args = JSON.parse(args)
@@ -929,41 +928,55 @@ class McpService {
               args
             })
           }
+          // 空字符串处理，转为 {}
           if (args === '') {
             args = {}
           }
         }
+
+        // c. 初始化 MCP 客户端（如未初始化会自动连接）
         const client = await this.initClient(server)
+
+        // d. 调用 MCP 工具的实际方法
         const result = await client.callTool({ name, arguments: args }, undefined, {
+          // e. 进度回调
           onprogress: (process) => {
-            getServerLogger(server, { tool: name, callId: toolCallId }).debug(`Progress`, {
-              ratio: process.progress / (process.total || 1)
-            })
+            const ratio = process.progress / (process.total || 1)
+            getServerLogger(server, { tool: name, callId: toolCallId }).debug('Progress', { ratio })
+
+            // 推送进度信息到前端窗口
             const mainWindow = windowService.getMainWindow()
             if (mainWindow) {
               mainWindow.webContents.send(IpcChannel.Mcp_Progress, {
                 callId: toolCallId,
-                progress: process.progress / (process.total || 1)
+                progress: ratio
               } as MCPProgressEvent)
             }
           },
-          timeout: server.timeout ? server.timeout * 1000 : 60000, // Default timeout of 1 minute,
-          // 需要服务端支持: https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle#timeouts
-          // Need server side support: https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle#timeouts
-          resetTimeoutOnProgress: server.longRunning,
-          maxTotalTimeout: server.longRunning ? 10 * 60 * 1000 : undefined,
-          signal: this.activeToolCalls.get(toolCallId)?.signal
+          // f. 超时相关配置
+          timeout: server.timeout ? server.timeout * 1000 : 60000, // 单次调用超时时间（默认1分钟）
+          // 详细说明：
+          // - 该超时需要服务端与客户端都支持才能生效
+          // - Lifecyle详见：https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle#timeouts
+          resetTimeoutOnProgress: server.longRunning, // 支持长时间运行的任务在进度有变化时重置超时
+          maxTotalTimeout: server.longRunning ? 10 * 60 * 1000 : undefined, // 长任务最大 10 分钟
+          signal: this.activeToolCalls.get(toolCallId)?.signal // 关联的信号用于支持取消
         })
+
+        // g. 返回调用结果
         return result as MCPCallToolResponse
       } catch (error) {
-        getServerLogger(server, { tool: name, callId: toolCallId }).error(`Error calling tool`, error as Error)
+        // h. 错误处理和日志
+        getServerLogger(server, { tool: name, callId: toolCallId }).error('Error calling tool', error as Error)
         throw error
       } finally {
+        // i. 调用完成（无论成功/失败），清理本次调用的中止控制器，防止泄漏
         this.activeToolCalls.delete(toolCallId)
       }
     }
 
-    return await withSpanFunc(`${server.name}.${name}`, `MCP`, callToolFunc, [{ server, name, args }])
+    // 4. 封装到链路跟踪（withSpanFunc），实现性能与调用链追踪，方便观察、排查
+    return await withSpanFunc(`${server.name}.${name}`, 'MCP', callToolFunc, [{ server, name, args }])
   }
 
   public async getInstallInfo() {

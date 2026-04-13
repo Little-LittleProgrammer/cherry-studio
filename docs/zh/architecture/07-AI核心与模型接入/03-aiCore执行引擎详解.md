@@ -173,6 +173,7 @@ const config: ProviderConfig = {
 ```
 
 关键转化：
+
 - `provider.id`（`dashscope`）→ `providerId`（`openai-compatible`）
 - `provider.apiHost` → `providerSettings.baseURL`
 - `provider.apiKey` → `providerSettings.apiKey`
@@ -444,12 +445,18 @@ UI 渲染              ChunkType[]                    可见文本
 
 - 顺序：`pre -> normal -> post`
 - 钩子类型：
-- `resolveModel` / `loadTemplate`（First）
-- `transformParams` / `transformResult`（Sequential）
-- `onRequestStart` / `onRequestEnd` / `onError`（Parallel）
-- `transformStream`（流转换收集）
-
+- `resolveModel` / `loadTemplate`（首个胜出）
+- `transformParams` / `transformResult`（顺序链式）
+- `onRequestStart` / `onRequestEnd` / `onError`（并行执行）
+- `transformStream`（流处理，收集所有 TransformStream）
 该机制是“请求编排统一扩展点”，把搜索、日志、工具调用、兼容修复都纳入同一生命周期。
+
+| 分类 | 核心问题 | 解决方案 |
+|------|----------|----------|
+| First-wins | 多个插件处理同一事，谁说了算？ | 只用第一个，避免冲突 |
+| Sequential | 参数需要层层加工怎么处理？ | 链式传递，累积合并 |
+| Parallel | 监控/日志等副作用要同时执行？ | Promise.all 并行 |
+| Collect | 多个流转换器怎么统一管理？ | 收集后一起传给 SDK |
 
 ## 5. options：Provider 参数工厂
 

@@ -91,6 +91,140 @@ MCP OAuth 相关实现位于 `src/main/services/mcp/oauth/`。
 
 这些特例是产品层”内置工具能力”的落点，扩展时需要和通用外部 MCP server 区分。
 
+### Hub MCP Server（元服务器）
+
+Hub MCP Server 是一个**内置的元服务器（meta-server）**，用于聚合所有已激活的 MCP Server，并通过一组通用元工具暴露给 LLM。
+
+- 源码：`src/main/mcpServers/hub/`
+- 核心类：`HubServer`（位于 `src/main/mcpServers/hub/index.ts`）
+
+#### 设计目的
+
+Hub 的核心价值是支撑 **Auto Mode（自动模式）**——让 LLM 能够**动态发现和调用**所有 MCP 工具，而不需要在每次请求前手动配置工具列表。
+
+对比两种模式：
+
+| | 普通模式（Manual） | Hub 模式（Auto） |
+|---|---|---|
+| 工具注入方式 | 将所有 MCP 工具的描述完整塞入 system prompt | 只注入 4 个元工具（`list`/`inspect`/`invoke`/`exec`） |
+| 工具发现 | 静态的，请求前决定注入哪些 | 动态的，LLM 通过 `list` 按需探索 |
+| 灵活性 | 新增 MCP Server 后需重新配置助手 | Hub 自动聚合，无需额外配置 |
+| 系统 prompt 大小 | 工具多时 prompt 很长 | 固定 4 个工具描述，较轻量 |
+
+#### 四个元工具
+
+| 工具 | 用途 | 输入参数 |
+|------|------|----------|
+| `list` | 分页列出所有可用 MCP 工具 | `limit`（默认 30，最大 100）、`offset`（默认 0） |
+| `inspect` | 获取单个工具签名（JSDoc 格式） | `name`（JS 名称或 `serverId__toolName`） |
+| `invoke` | 调用单个工具 | `name`、`params` |
+| `exec` | 执行 JS 代码编排多步工具调用 | `code`（可使用 `mcp.callTool()`、`mcp.log()`、`parallel()`、`settle()`） |
+
+#### Auto Mode 集成流程
+
+当助手设置为 Auto 模式时：
+
+1. Hub Server 作为唯一的 MCP Server 注入到模型参数中
+2. 拼接专用的 system prompt，指导 LLM 如何使用 `list`/`inspect`/`invoke`/`exec`
+3. LLM 的典型使用流程：`list` 发现工具 → `inspect` 了解参数 → `invoke`/`exec` 执行
+
+#### 工具名称映射
+
+Hub 同时支持两种工具名称格式：
+
+- **JS 格式（camelCase）**：如 `githubSearchRepos`，方便 LLM 编写代码调用
+- **原始命名（namespaced）**：如 `github__search_repos`（`serverId__toolName`）
+
+两者均可用于 `inspect`、`invoke` 和 `mcp.callTool()`。映射关系由 `src/main/mcpServers/hub/toolname.ts` 中的 `buildToolNameMapping` 构建。
+
+#### 调用桥接（mcp-bridge）
+
+Hub 不直接执行工具，而是通过 `mcp-bridge.ts` 桥接到 `MCPService`：
+
+```
+HubServer → callMcpTool(name, params) → mcp-bridge → MCPService.callToolById(toolId) → 具体 MCP Server
+```
+
+- `callMcpTool()` 接收 JS 名称或 namespaced ID，解析后路由到对应的 MCP Server
+- 工具定义缓存 **1 分钟**，MCP Server 连接/断开时通过 `invalidateCache()` 失效
+- 错误处理：通过 `extractToolResult()` 提取结果，`throwIfToolError()` 抛出异常
+
+#### 缓存机制
+
+- 工具定义缓存 key：`hub:tools:v2`
+- TTL：60 秒
+- 缓存失效时机：MCP Server 连接/断开时调用 `invalidateCache()`
+- 缓存命中时同步工具映射，避免重复遍历
+
+#### 调用链路（Hub 如何调用其他 MCP）
+
+Hub 本身不直接连接外部 MCP Server，而是通过 `mcp-bridge.ts` 桥接到 `MCPService`，由 `MCPService` 路由到具体的 MCP Server 实例。
+
+**完整调用链路：**
+
+```
+LLM 请求
+  │
+  ├─ invoke 模式 ────────────────────────────────────────────┐
+  │   HubServer.handleInvoke()                                │
+  │   → callMcpTool(name, params)                             │
+  │                                                          │
+  ├─ exec 模式                                               │
+  │   Runtime.execute(code)                                   │
+  │     └─ new Worker(hubWorkerSource)  // 独立 Worker 沙箱    │
+  │          用户代码: mcp.callTool("xxx")                    │
+  │          worker.postMessage("callTool")                   │
+  │          ↓                                                │
+  │     handleMessage → handleToolCall                        │
+  │                                                          │
+  └──────────────────────────────────────────────────────────┘
+                        │
+                        ▼
+              callMcpTool(nameOrId, params, callId)
+              [mcp-bridge.ts:87]
+                        │
+              1. resolveToolId(nameOrId)
+                 "githubSearchRepos" → "github__search_repos"
+                        │
+              2. mcpService.callToolById(toolId, params, callId)
+                 [MCPService.ts:207]
+                        │
+              3. toolId.split('__')
+                 → serverId = "github", toolName = "search_repos"
+                        │
+              4. 找到对应的 MCP Server 实例
+                 server.client.callTool({ name, params })
+                        │
+                        ▼
+              具体的 MCP Server (stdio/SSE/HTTP...)
+```
+
+**两种调用模式的区别：**
+
+| | `invoke` | `exec` |
+|---|---|---|
+| 执行环境 | 主进程直接调用 | 独立 Node.js Worker（`Worker` 线程） |
+| 隔离性 | 无 | 代码沙箱隔离 |
+| 能力 | 调用单个工具 | 可编排多步调用，支持 `parallel()`、`settle()` |
+| 超时 | 跟随模型请求 | 固定 60 秒（`EXECUTION_TIMEOUT`） |
+| 日志 | MCP Server 自身日志 | Worker 通过 `mcp.log()` / `console.*` 回传，最多 1000 条 |
+
+**exec 模式的 Worker 通信流程：**
+
+```
+Runtime.execute(code)
+  → 创建 Worker，postMessage("exec", code)
+  → Worker 运行代码
+  → Worker 调用 mcp.callTool("xxx") → postMessage("callTool")
+  → 主线程收到 "callTool" → callMcpTool() → 调用目标 MCP
+  → 结果 postMessage("toolResult") 回传 Worker
+  → Worker 继续执行，最终 postMessage("result")
+  → Runtime finalize，返回 ExecOutput
+```
+
+- 超时或异常时，通过 `abortMcpTool(callId)` 取消所有活跃的工具调用（`runtime.ts:64-69`）
+- Worker 退出码非 0 或意外退出时，记录错误并标记 `isError: true`
+
 ### 连接超时与重试
 
 MCP 客户端初始化支持连接超时配置。对于 stdio 传输，还会解析登录 shell 环境变量，处理 bundle 降级（npx → bun，uv/uvx 使用内置版本），以及 DXT server 配置解析。
