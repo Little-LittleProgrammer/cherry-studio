@@ -252,33 +252,57 @@ export async function getMessageTitle(message: Message, length = 30): Promise<st
 
   return title
 }
-
+/**
+ * 检查指定助手（assistant）是否因速率限制（rate limit）而需要等待。
+ *
+ * 逻辑步骤如下：
+ * 1. 获取该助手的 provider 并判断其是否有设置 rateLimit，如果没有则不受限制，返回 false。
+ * 2. 获取该助手的第一个 topic 的 id，并根据此 id 查询该话题下的消息列表。
+ * 3. 如果消息为空或只有一条消息，则直接返回 false（没有超出速率限制）。
+ * 4. 计算最后一条消息的时间和当前时间的差值（单位：毫秒），再得到 provider 限定的最小间隔（毫秒）。
+ * 5. 如果间隔小于限定值，则提示用户还需等待多少秒（四舍五入上取整），返回 true，表示“当前受速率限制，需要等待”。
+ * 6. 若无上述情况，则返回 false，表示不受速率限制，可继续操作。
+ */
 export function checkRateLimit(assistant: Assistant): boolean {
+  // 获取助手的 provider（服务提供者）
   const provider = getAssistantProvider(assistant)
 
+  // 如果未设置速率限制，直接返回不受限制
   if (!provider?.rateLimit) {
     return false
   }
 
+  // 获取当前助手的第一个话题 id
   const topicId = assistant.topics[0].id
+
+  // 获取该话题下所有消息
   const messages = selectMessagesForTopic(store.getState(), topicId)
 
+  // 如果该话题下消息为空或只有一条，认为不触发速率限制
   if (!messages || messages.length <= 1) {
     return false
   }
 
+  // 当前时间（毫秒）
   const now = Date.now()
+  // 最后一条消息
   const lastMessage = messages[messages.length - 1]
+  // 最后一条消息的创建时间（毫秒）
   const lastMessageTime = new Date(lastMessage.createdAt).getTime()
+  // 距离上次消息的时间差（毫秒）
   const timeDiff = now - lastMessageTime
+  // 速率限制对应的最小等待时间（毫秒）
   const rateLimitMs = provider.rateLimit * 1000
 
+  // 如果距离上次消息的时间还没到速率下限
   if (timeDiff < rateLimitMs) {
     const waitTimeSeconds = Math.ceil((rateLimitMs - timeDiff) / 1000)
 
+    // 弹出提示告知用户需要等待
     window.toast.warning(t('message.warning.rate.limit', { seconds: waitTimeSeconds }))
-    return true
+    return true // 当前受速率限制
   }
 
+  // 没有触发速率限制
   return false
 }

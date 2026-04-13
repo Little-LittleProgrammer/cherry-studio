@@ -52,6 +52,21 @@ async function getMessageParam(message: Message): Promise<MessageItem[]> {
 /**
  * 估算文本内容的 token 数量
  *
+ * 算法说明：
+ * 本函数通过调用 approximateTokenSize 方法来估算文本内容的 token 数量。
+ * 其原理通常为：将文本分词（依据模型的编码规则，例如 OpenAI 的 tiktoken 方式），
+ * 每个 token 代表着模型内部的最小可处理单位（如单词、子词甚至单个字符组），
+ * approximateTokenSize 实现可能会基于字符数、空格划分、多字节字符等规则进行统计。
+ *
+ * 例如，“Hello, world!” 这种句子，可能被划分为 4 个 token：
+ * - "Hello"
+ * - ","
+ * - " world"
+ * - "!"
+ *
+ * 不同的模型/算法可能 token 切分方式各异，本函数只是提供基于 approximateTokenSize
+ * 的简易估算。
+ *
  * @param text - 需要估算的文本内容
  * @returns 返回估算的 token 数量
  */
@@ -73,15 +88,19 @@ export function estimateImageTokens(file: FileMetadata) {
 }
 
 /**
- * 估算用户输入内容（文本和文件）的 token 用量。
+ * 解释：此函数用于估算用户输入的文本和文件内容所需的 token 数量。
  *
- * 该函数只根据传入的 content（文本内容）和 files（文件列表）估算，
- * 不依赖完整的 Message 结构，也不会处理消息块、上下文等信息。
+ * 工作原理：
+ * - 针对文本内容，调用 estimateTextTokens 方法进行 token 数量估算；
+ * - 针对文件（如图片），遍历所有文件，若为图片则用 estimateImageTokens 进行图片 token 估算；
+ * - 该函数仅依据传入的 content（文本）和 files（文件列表）做简单统计，不分析消息上下文或结构，仅做用量预估；
+ * - 返回的 Usage 对象包括 prompt_tokens、completion_tokens 和 total_tokens。
  *
- * @param {Object} params - 输入参数对象
- * @param {string} [params.content] - 用户输入的文本内容
- * @param {FileMetadata[]} [params.files] - 用户上传的文件列表（支持图片和文本）
- * @returns {Promise<Usage>} 返回一个 Usage 对象，包含 prompt_tokens、completion_tokens、total_tokens
+ * 参数说明：
+ * @param {Object} params
+ * @param {string} [params.content] - 用户的文本内容
+ * @param {FileMetadata[]} [params.files] - 用户上传的文件（支持图片和文本）
+ * @returns {Promise<Usage>} Usage 对象，分别表示提示（prompt）、补全（completion）和合计（total）的 token 数量
  */
 export async function estimateUserPromptUsage({
   content,
@@ -90,19 +109,23 @@ export async function estimateUserPromptUsage({
   content?: string
   files?: FileMetadata[]
 }): Promise<Usage> {
+  // 图片 token 总数初始化
   let imageTokens = 0
 
+  // 如果传入了文件，遍历筛选图片，累计图片 token 数
   if (files && files.length > 0) {
     const images = files.filter((f) => f.type === FILE_TYPE.IMAGE)
     if (images.length > 0) {
       for (const image of images) {
-        imageTokens = estimateImageTokens(image) + imageTokens
+        imageTokens += estimateImageTokens(image)
       }
     }
   }
 
+  // 文本 token 数量估算
   const tokens = estimateTextTokens(content || '')
 
+  // 返回用量：prompt/completion 使用相同的 token 数，total_tokens 加上图片 token 并减去 7 进行修正
   return {
     prompt_tokens: tokens,
     completion_tokens: tokens,

@@ -370,6 +370,20 @@ export function processKnowledgeReferences(
   }
 }
 
+/**
+ * 注入引用搜索提示到最近的用户消息。
+ *
+ * 该函数用于在用户最新的问题中，根据助手所配置的知识库，自动进行知识库检索，并将检索到的知识引用信息，按特定提示格式替换到该用户消息的内容中。
+ *
+ * 步骤说明：
+ * 1. 检查助手是否绑定知识库，并且有用户消息；
+ * 2. 找到最后一条消息，确认其为用户问题 role 为 user；
+ * 3. 基于最后一条用户消息内容，调用知识库搜索，获取相关知识引用（knowledgeReferences）；
+ * 4. 若没有找到可用引用则返回；
+ * 5. 构建引用块并将其插入，便于后续渲染参考信息；
+ * 6. 用模板 REFERENCE_PROMPT，通过替换 {question} 和 {references}，生成新的消息内容 knowledgeSearchPrompt；
+ * 7. 将 knowledgeSearchPrompt 设置到用户消息内容中。如果 content 为字符串则直接替换，如果是数组则替换或追加 text 类型部分。
+ */
 export const injectUserMessageWithKnowledgeSearchPrompt = async ({
   modelMessages,
   assistant,
@@ -385,48 +399,58 @@ export const injectUserMessageWithKnowledgeSearchPrompt = async ({
   blockManager: BlockManager
   setCitationBlockId: (blockId: string) => void
 }) => {
-  if (assistant.knowledge_bases?.length && modelMessages.length > 0) {
-    const lastUserMessage = modelMessages[modelMessages.length - 1]
-    const isUserMessage = lastUserMessage.role === 'user'
+  // 若助手未配置知识库或者当前无用户消息，则不处理
+  if (!(assistant.knowledge_bases?.length && modelMessages.length > 0)) {
+    return
+  }
 
-    if (!isUserMessage) {
-      return
-    }
+  // 取出最后一条用户消息
+  const lastUserMessage = modelMessages[modelMessages.length - 1]
 
-    const knowledgeReferences = await getKnowledgeReferences({
-      assistant,
-      lastUserMessage,
-      topicId: topicId
-    })
+  // 判断是否真的是用户消息
+  if (lastUserMessage.role !== 'user') {
+    return
+  }
 
-    if (knowledgeReferences.length === 0) {
-      return
-    }
+  // 基于用户消息进行知识库检索，返回引用
+  const knowledgeReferences = await getKnowledgeReferences({
+    assistant,
+    lastUserMessage,
+    topicId: topicId
+  })
 
-    await createKnowledgeReferencesBlock({
-      assistantMsgId,
-      knowledgeReferences,
-      blockManager,
-      setCitationBlockId
-    })
+  // 没有引用内容则无需处理
+  if (knowledgeReferences.length === 0) {
+    return
+  }
 
-    const question = getMessageContent(lastUserMessage) || ''
-    const references = JSON.stringify(knowledgeReferences, null, 2)
+  // 插入引用块
+  await createKnowledgeReferencesBlock({
+    assistantMsgId,
+    knowledgeReferences,
+    blockManager,
+    setCitationBlockId
+  })
 
-    const knowledgeSearchPrompt = REFERENCE_PROMPT.replace('{question}', question).replace('{references}', references)
+  // 取出用户问题和引用内容
+  const question = getMessageContent(lastUserMessage) || ''
+  const references = JSON.stringify(knowledgeReferences, null, 2)
 
-    if (typeof lastUserMessage.content === 'string') {
-      lastUserMessage.content = knowledgeSearchPrompt
-    } else if (Array.isArray(lastUserMessage.content)) {
-      const textPart = lastUserMessage.content.find((part) => part.type === 'text')
-      if (textPart) {
-        textPart.text = knowledgeSearchPrompt
-      } else {
-        lastUserMessage.content.push({
-          type: 'text',
-          text: knowledgeSearchPrompt
-        })
-      }
+  // 按模板生成新的用户消息内容
+  const knowledgeSearchPrompt = REFERENCE_PROMPT.replace('{question}', question).replace('{references}', references)
+
+  // 根据消息内容类型（字符串或数组）设置新的内容
+  if (typeof lastUserMessage.content === 'string') {
+    lastUserMessage.content = knowledgeSearchPrompt
+  } else if (Array.isArray(lastUserMessage.content)) {
+    const textPart = lastUserMessage.content.find((part) => part.type === 'text')
+    if (textPart) {
+      textPart.text = knowledgeSearchPrompt
+    } else {
+      lastUserMessage.content.push({
+        type: 'text',
+        text: knowledgeSearchPrompt
+      })
     }
   }
 }

@@ -831,25 +831,69 @@ const dispatchMultiModelResponses = async (
   }
 }
 
-// --- End Helper Function ---
-// 发送和处理助手响应的实现函数，话题提示词在此拼接
+/**
+ * fetchAndProcessAssistantResponseImpl 解释
+ *
+ * 该函数负责发送助手（Assistant）的响应并处理整个响应流（stream），针对不同对话场景自动拼接话题级（topic）提示词，收集上下文消息，实例化 BlockManager，实现自动存储、队列管理、中止控制、流式处理等能力。
+ *
+ * ## 主要步骤
+ *
+ * 1. **话题提示词拼接**
+ *    - 若对应 topic 有自定义 prompt，则将其和助手原有 prompt 合并，确保上下文更加贴合当前主题需求。
+ *
+ * 2. **设置 Loading 状态**
+ *    - 分发 Redux Action，将当前 topic 的 loading 状态设为 true，配合前端 loading 动画及队列顺序控制。
+ *
+ * 3. **BlockManager 实例化**
+ *    - 创建 BlockManager，协调多块消息的更新、存储和 DB 持久化，支持流式切片渲染。
+ *
+ * 4. **获取对话上下文消息**
+ *    - 提取当前 topic 下所有消息，定位用户触发消息（askId）在列表中的索引，并取出对应的历史消息作为上下文，过滤掉未完成（ing）的消息，避免上下文混乱。
+ *    - 如未能找到用户消息，降级兜底最多查找一次 assistantMessage，本意是防止极端并发异常导致的 context 丢失。
+ *    - 若最终仍未获取到上下文，则尝试单独插入用户触发消息，以确保大模型 payload 不为空。
+ *
+ * 5. **初始化回调与流处理器**
+ *    - createCallbacks 用于构造监听事件与中间件（如 Block 渲染、DB 更新等）相关回调，createStreamProcessor 组装流式内容处理逻辑。
+ *
+ * 6. **Abort 控制与自动中断支持**
+ *    - 为本次会话添加 AbortController，并写入全局管理器（addAbortController），以便用户中断请求。
+ *
+ * 7. **Agent 工具列表获取（可选）**
+ *    - 若当前为代理 Agent 对话，自动去后端查找 agent 配置的 allowed_tools，为后续工具自动审批和权限判断做准备。
+ *
+ * 8. **核心流式请求及响应处理**
+ *    - 调用 transformMessagesAndFetch，传入消息上下文、助手配置、回调、Abort 信号等参数，正式发起大模型响应流，并实时更新到 BlockManager、前端 store 及数据库。
+ *
+ * 9. **统一异常处理**
+ *    - 捕获全过程异常，记录日志，正确关闭 loading 状态，回调 onError，防止队列任务挂起。
+ *
+ * @param dispatch       Redux 派发函数
+ * @param getState       获取 Redux state
+ * @param topicId        当前对话主题 ID
+ * @param origAssistant  原始助手（大模型）对象（会自动合并 topic.prompt）
+ * @param assistantMessage  本轮助手消息（通常已在 Multi-Model/对话队列新建或重置）
+ */
 const fetchAndProcessAssistantResponseImpl = async (
   dispatch: AppDispatch,
   getState: () => RootState,
   topicId: string,
   origAssistant: Assistant,
-  assistantMessage: Message // Pass the prepared assistant message (new or reset)
+  assistantMessage: Message
 ) => {
+  // 1. 拼接 topic 提示词（如有）
   const topic = origAssistant.topics.find((t) => t.id === topicId)
   const assistant = topic?.prompt
     ? { ...origAssistant, prompt: `${origAssistant.prompt}\n${topic.prompt}` }
     : origAssistant
+
   const assistantMsgId = assistantMessage.id
   let callbacks: StreamProcessorCallbacks = {}
+
   try {
+    // 2. 设置 Loading
     dispatch(newMessagesActions.setTopicLoading({ topicId, loading: true }))
 
-    // 创建 BlockManager 实例
+    // 3. BlockManager 实例化
     const blockManager = new BlockManager({
       dispatch,
       getState,
@@ -861,12 +905,11 @@ const fetchAndProcessAssistantResponseImpl = async (
       cancelThrottledBlockUpdate
     })
 
+    // 4. 获取上下文
     const allMessagesForTopic = selectMessagesForTopic(getState(), topicId)
-
     let messagesForContext: Message[] = []
     const userMessageId = assistantMessage.askId
     const userMessageIndex = allMessagesForTopic.findIndex((m) => m?.id === userMessageId)
-
     if (userMessageIndex === -1) {
       logger.error(
         `[fetchAndProcessAssistantResponseImpl] Triggering user message ${userMessageId} (askId of ${assistantMsgId}) not found. Falling back.`
@@ -881,8 +924,7 @@ const fetchAndProcessAssistantResponseImpl = async (
       const contextSlice = allMessagesForTopic.slice(0, userMessageIndex + 1)
       messagesForContext = contextSlice.filter((m) => m && !m.status?.includes('ing'))
     }
-
-    // Ensure at least the triggering user message is present to avoid empty payloads
+    // 空安全兜底
     if ((!messagesForContext || messagesForContext.length === 0) && userMessageId) {
       const stateAfter = getState()
       const maybeUserMessage = stateAfter.messages.entities[userMessageId]
@@ -891,6 +933,7 @@ const fetchAndProcessAssistantResponseImpl = async (
       }
     }
 
+    // 5. 回调与流式处理器
     callbacks = createCallbacks({
       blockManager,
       dispatch,
@@ -902,11 +945,12 @@ const fetchAndProcessAssistantResponseImpl = async (
     })
     const streamProcessorCallbacks = createStreamProcessor(callbacks)
 
+    // 6. AbortControl 支持
     const abortController = new AbortController()
     logger.silly('Add Abort Controller', { id: userMessageId })
     addAbortController(userMessageId!, () => abortController.abort())
 
-    // Fetch agent allowed_tools for MCP auto-approval
+    // 7. Agent 工具白名单拉取
     let allowedTools: string[] | undefined
     const activeAgentId = getState().runtime.chat.activeAgentId
     const apiServer = getState().settings.apiServer
@@ -922,10 +966,11 @@ const fetchAndProcessAssistantResponseImpl = async (
         const agentData = await agentClient.getAgent(activeAgentId)
         allowedTools = agentData?.allowed_tools
       } catch {
-        // Agent fetch failed — proceed without allowedTools
+        // agent 获取失败，允许后续流程继续
       }
     }
 
+    // 8. 发起模型流式响应请求
     await transformMessagesAndFetch(
       {
         messages: messagesForContext,
@@ -943,45 +988,62 @@ const fetchAndProcessAssistantResponseImpl = async (
       streamProcessorCallbacks
     )
   } catch (error: any) {
+    // 9. 异常兜底
     logger.error('Error in fetchAndProcessAssistantResponseImpl:', error)
     endSpan({
       topicId,
       error: error,
       modelName: assistant.model?.name
     })
-    // 统一错误处理：确保 loading 状态被正确设置，避免队列任务卡住
     try {
       callbacks.onError?.(error)
     } catch (callbackError) {
       logger.error('Error in onError callback:', callbackError as Error)
     } finally {
-      // 确保无论如何都设置 loading 为 false（onError 回调中已设置，这里是保险）
       dispatch(newMessagesActions.setTopicLoading({ topicId, loading: false }))
     }
   }
 }
 
 /**
- * 发送消息并处理助手回复
+ * sendMessage 解释
  *
- * ## 三种响应分支
- * 1. **Agent 会话模式** (`activeAgentSession` 存在)
- *    - 调用 `fetchAndProcessAgentResponseImpl`
- *    - 需要维护 Agent Session 上下文，确保对话连续性
+ * 该函数是 Redux Thunk，用于统一处理用户消息的发送流程，并根据不同场景自动调用对应的响应处理逻辑。整体分为三种消息应答分支，确保处理逻辑和会话上下文的正确性。
  *
- * 2. **多模型并行响应模式** (`mentionedModels.length > 0`)
- *    - 调用 `dispatchMultiModelResponses`
- *    - 用户通过 @ 提及多个模型，并行请求多个模型响应
+ * ## 实现步骤
  *
- * 3. **普通助手对话** (默认)
- *    - 调用 `fetchAndProcessAssistantResponseImpl`
- *    - 标准的单模型对话流程
+ * 1. **空消息块判断**
+ *    如果用户消息没有内容块（blocks），直接中断发送，并记录警告日志。
  *
- * @param userMessage 已创建的用户消息
- * @param userMessageBlocks 用户消息关联的消息块
- * @param assistant 助手对象
- * @param topicId 主题ID
- * @param agentSession 可选的 Agent 会话上下文，用于 Agent 会话模式
+ * 2. **Agent Session 上下文处理**
+ *    - 优先使用参数 `agentSession`。如果没有，使用 `findExistingAgentSessionContext` 从 Redux store 查找当前 assistant 与 topic 下最近的 agent session。
+ *    - 如果 sessionId 信息有更新，确保取到最新的 agentSessionId，并赋值到 activeAgentSession。
+ *    - 若找到了 agentSessionId，自动补全到用户消息上，保证后续消息链追踪的连续性。
+ *
+ * 3. **消息持久化**
+ *    - 优先将 userMessage 及其 blocks 持久化进数据库，保证前端 UI 呈现的数据和持久化一致，减少数据错乱几率。
+ *    - 将用户消息更新到 Redux store，并同步相关的消息块。
+ *    - 更新当前 topic 的更新时间字段。
+ *
+ * 4. **topic 消息处理队列机制**
+ *    - 每个 topic 拥有独立处理队列，保证对话顺序和多并发场景下的消息响应有序，无乱序风险。
+ *
+ * 5. **三种响应分支说明**
+ *    - (1) **Agent 会话分支**：如 activeAgentSession 存在，则走 agent session 流程。
+ *      - 生成 assistantMessage（自动带 askId、model 等信息），关联 agentSessionId，写入数据库与 store。
+ *      - 入队列，异步调用 fetchAndProcessAgentResponseImpl，保证 session 上下文连续。
+ *    - (2) **多模型并行分支**：如用户消息包含 mentions，则调用 dispatchMultiModelResponses，并行请求多个模型响应。
+ *    - (3) **默认助手分支**：标准对话流程，生成 assistantMessage，写入 DB & store，异步队列调用 fetchAndProcessAssistantResponseImpl。
+ *
+ * 6. **通用异常处理**
+ *    - 捕获所有发送流程异常，记录错误日志。
+ *    - 无论是否异常，最后均调用 finishTopicLoading，确保 loading 状态正确关闭。
+ *
+ * @param userMessage 用户发送的消息对象
+ * @param userMessageBlocks 消息关联的内容块
+ * @param assistant 助手（模型）对象
+ * @param topicId 当前主题ID
+ * @param agentSession 可选，agent 会话上下文（如有）
  */
 export const sendMessage =
   (
@@ -993,22 +1055,15 @@ export const sendMessage =
   ) =>
   async (dispatch: AppDispatch, getState: () => RootState) => {
     try {
-      // 空消息块检查，避免发送无效消息
+      // 1. 空消息块检查
       if (userMessage.blocks.length === 0) {
         logger.warn('sendMessage: No blocks in the provided message.')
         return
       }
 
-      // ==================== Agent Session 处理 ====================
-      // 为什么需要双重查找？
-      // 1. agentSession 参数可能来自外部调用（如用户点击触发），可能不是最新状态
-      // 2. 需要从 Redux store 中重新查找最新的 agentSessionId，确保消息能正确关联到已有的 Agent 会话链
-      // 3. findExistingAgentSessionContext 会从消息历史中倒序查找最近一条同 assistant 的消息的 agentSessionId
+      // 2. Agent Session 上下文查找与同步
       const stateBeforeSend = getState()
       let activeAgentSession = agentSession ?? findExistingAgentSessionContext(stateBeforeSend, topicId, assistant.id)
-
-      // 如果存在 Agent Session，需要同步最新的 agentSessionId
-      // 场景：外部传入的 agentSession 可能有 sessionId 但缺少 agentSessionId，或者 agentSessionId 已过期
       if (activeAgentSession) {
         const derivedSession = findExistingAgentSessionContext(stateBeforeSend, topicId, assistant.id)
         if (derivedSession?.agentSessionId && derivedSession.agentSessionId !== activeAgentSession.agentSessionId) {
@@ -1018,14 +1073,11 @@ export const sendMessage =
           }
         }
       }
-
-      // 将 agentSessionId 关联到用户消息，用于后续消息链追踪
       if (activeAgentSession?.agentSessionId && !userMessage.agentSessionId) {
         userMessage.agentSessionId = activeAgentSession.agentSessionId
       }
 
-      // ==================== 消息持久化 ====================
-      // 先存 DB 再更新 Redux，确保 UI 显示的数据一定已持久化，避免数据不一致
+      // 3. 消息写库、同步 Redux
       await saveMessageAndBlocksToDB(topicId, userMessage, userMessageBlocks)
       dispatch(newMessagesActions.addMessage({ topicId, message: userMessage }))
       if (userMessageBlocks.length > 0) {
@@ -1033,19 +1085,17 @@ export const sendMessage =
       }
       dispatch(updateTopicUpdatedAt({ topicId }))
 
-      // ==================== 队列机制 ====================
-      // 每个 topic 有独立队列，保证同 topic 的消息按顺序处理，避免并发导致的响应乱序
+      // 4. 分离处理队列
       const queue = getTopicQueue(topicId)
 
-      // ==================== 三种响应分支 ====================
+      // 5. 分支逻辑
       if (activeAgentSession) {
-        // 分支 1: Agent 会话模式 - 需要维护 session 上下文
+        // (1) Agent 会话分支
         const assistantMessage = createAssistantMessage(assistant.id, topicId, {
           askId: userMessage.id,
           model: assistant.model,
           traceId: userMessage.traceId
         })
-        // 助手消息也需要关联 agentSessionId，保持会话链完整
         if (activeAgentSession.agentSessionId && !assistantMessage.agentSessionId) {
           assistantMessage.agentSessionId = activeAgentSession.agentSessionId
         }
@@ -1065,10 +1115,10 @@ export const sendMessage =
         const mentionedModels = userMessage.mentions
 
         if (mentionedModels && mentionedModels.length > 0) {
-          // 分支 2: 多模型并行响应模式 - 用户 @ 提及了多个模型
+          // (2) 多模型并行分支
           await dispatchMultiModelResponses(dispatch, getState, topicId, userMessage, assistant, mentionedModels)
         } else {
-          // 分支 3: 普通助手对话 - 标准单模型对话流程
+          // (3) 普通助手分支
           const assistantMessage = createAssistantMessage(assistant.id, topicId, {
             askId: userMessage.id,
             model: assistant.model,

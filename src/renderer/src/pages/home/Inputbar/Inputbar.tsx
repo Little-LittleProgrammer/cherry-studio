@@ -232,13 +232,32 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
         })
       })
 
+  /**
+   * sendMessage 用于发送用户输入消息的核心函数。
+   *
+   * 1. 首先检查速率限制（如请求太频繁则直接返回）。
+   * 2. 启动日志记录和性能监控（trace），方便跟踪问题与性能分析。
+   * 3. 触发 SEND_MESSAGE 事件，通知应用其他部分有新消息准备发送。
+   * 4. 处理文件上传，如果用户发送了文件，先异步上传文件。
+   * 5. 构建基本的消息参数对象（baseUserMessage），包括助理配置、话题、内容等，
+   *    若有上传文件、@提及模型，也加入对应属性。
+   * 6. 异步估算该消息的 token 用量，为后续计费或限制服务。
+   * 7. 生成实际将要发送的消息对象和内容块（blocks）。
+   * 8. 调用 dispatch，发送消息到 Redux store 以及执行对应的业务逻辑。
+   * 9. 发送成功后，重置输入框内容、文件、主动调整 textarea 尺寸并重新聚焦输入框，
+   *    以兼容部分中文输入法（如 fcitx5）的输入状态。
+   * 10. 若有异常，记录日志并在性能跟踪中埋点异常细节方便排查。
+   */
   const sendMessage = useCallback(async () => {
+    // 步骤1: 检查速率限制
     if (checkRateLimit(assistant)) {
       return
     }
 
-    logger.info('Starting to send message')
+    // 步骤2: 日志记录
+    logger.info('sendMessage: 开始发送消息')
 
+    // 步骤3: 启动 trace 并发出 SEND_MESSAGE 事件
     const parent = spanManagerService.startTrace(
       { topicId: topic.id, name: 'sendMessage', inputs: text },
       mentionedModels.length > 0 ? mentionedModels : [assistant.model]
@@ -246,8 +265,10 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
     void EventEmitter.emit(EVENT_NAMES.SEND_MESSAGE, { topicId: topic.id, traceId: parent?.spanContext().traceId })
 
     try {
+      // 步骤4: 上传文件（如果存在）
       const uploadedFiles = await FileManager.uploadFiles(files)
 
+      // 步骤5: 构造消息参数
       const baseUserMessage: MessageInputBaseParams = { assistant, topic, content: text }
       if (uploadedFiles) {
         baseUserMessage.files = uploadedFiles
@@ -256,20 +277,26 @@ const InputbarInner: FC<InputbarInnerProps> = ({ assistant: initialAssistant, se
         baseUserMessage.mentions = mentionedModels
       }
 
+      // 步骤6: 预估输入 token 用量
       baseUserMessage.usage = await estimateUserPromptUsage(baseUserMessage)
 
+      // 步骤7: 获取消息对象和 blocks
       const { message, blocks } = getUserMessage(baseUserMessage)
       message.traceId = parent?.spanContext().traceId
 
+      // 步骤8: 触发消息发送
+      // dispatch 是用于分发 Redux action 的函数，这里它将 _sendMessage action（包含消息内容、内容块、助理和话题 ID）分发到 Redux store，驱动后续消息发送的业务逻辑和状态更新。
       void dispatch(_sendMessage(message, blocks, assistant, topic.id))
 
+      // 步骤9: 清空输入框和已选文件、调整 textarea 大小并重获焦点
       setText('')
       setFiles([])
       setTimeoutTimer('sendMessage_1', () => setText(''), 500)
       setTimeoutTimer('sendMessage_2', () => resizeTextArea(), 0)
-      // Restore focus to textarea after sending to maintain IME state (fcitx5 issue)
+      // 兼容某些输入法（如 fcitx5）的 IME 状态
       focusTextarea()
     } catch (error) {
+      // 步骤10: 错误处理及埋点
       logger.warn('Failed to send message:', error as Error)
       parent?.recordException(error as Error)
     }

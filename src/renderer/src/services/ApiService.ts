@@ -134,11 +134,33 @@ export async function fetchMcpTools(assistant: Assistant) {
 }
 
 /**
- * 将用户消息转换为LLM可以理解的格式并发送请求
- * @param request - 包含消息内容和助手信息的请求对象
- * @param onChunkReceived - 接收流式响应数据的回调函数
+ * 该函数的作用是将用户输入的消息格式转换为大语言模型（LLM）能够理解的格式，
+ * 并根据不同的助手模型类型选择合适的数据处理和请求方式，然后将请求发送到后端获取响应流。
+ *
+ * 主要流程如下：
+ * 1. 对原始消息进行预处理，根据所选助手准备适合LLM的输入（如 modelMessages 供模型使用，uiMessages 供前端展示）。
+ * 2. 替换助手提示词(prompt)中的占位变量（如模型名称）。
+ * 3. 如果当前助手所选模型是专用的图像生成模型，则直接走图片生成相关的请求（fetchImageGeneration），不走文本聊天。
+ * 4. 对于一般助手模型，进一步对消息做知识增强（如查找知识检索结果并注入到消息流中）。
+ * 5. 调用 fetchChatCompletion 执行与LLM的流式对话请求，并通过 onChunkReceived 回调实时处理响应。
+ * 6. 如果流程中出现异常，则通过 onChunkReceived 抛出错误类型的信息。
+ *
+ * @param request - {
+ *   messages: 原始对话消息数组
+ *   assistant: 当前所用助手对象
+ *   blockManager: 块内容管理器（常用于知识引用和检索）
+ *   assistantMsgId: 当前助手消息的唯一ID
+ *   callbacks: 用于流式处理中设置引用等回调
+ *   topicId?: 可选的话题标识，用于 trace
+ *   allowedTools?: 限定本次请求允许使用的工具
+ *   options: {
+ *     signal?: AbortSignal // 用于取消请求
+ *     timeout?: number // 请求超时时长
+ *     headers?: Record<string, string> // 额外请求头
+ *   }
+ * }
+ * @param onChunkReceived - 流式接收LLM响应内容的回调
  */
-// 目前先按照函数来写,后续如果有需要到class的地方就改回来
 export async function transformMessagesAndFetch(
   request: {
     messages: Message[]
@@ -146,7 +168,7 @@ export async function transformMessagesAndFetch(
     blockManager: BlockManager
     assistantMsgId: string
     callbacks: StreamProcessorCallbacks
-    topicId?: string // 添加 topicId 用于 trace
+    topicId?: string // 支持 trace
     allowedTools?: string[]
     options: {
       signal?: AbortSignal
@@ -159,12 +181,13 @@ export async function transformMessagesAndFetch(
   const { messages, assistant } = request
 
   try {
+    // 1. 消息格式适配，将用户消息转为模型所需 message structure
     const { modelMessages, uiMessages } = await ConversationService.prepareMessagesForModel(messages, assistant)
 
-    // replace prompt variables
+    // 2. 替换Assistant.prompt里需要注入的变量（如模型名）
     assistant.prompt = await replacePromptVariables(assistant.prompt, assistant.model?.name)
 
-    // 专用图像生成模型直接走 fetchImageGeneration
+    // 3. 针对专用图像生成模型（如SD, DALL·E）直接走图片生成接口
     const model = assistant.model || getDefaultModel()
     if (isDedicatedImageGenerationModel(model)) {
       await fetchImageGeneration({
@@ -175,7 +198,7 @@ export async function transformMessagesAndFetch(
       return
     }
 
-    // inject knowledge search prompt into model messages
+    // 4. 对输入消息注入知识检索提示，用于提升LLM的引用能力
     await injectUserMessageWithKnowledgeSearchPrompt({
       modelMessages,
       assistant,
@@ -185,6 +208,7 @@ export async function transformMessagesAndFetch(
       setCitationBlockId: request.callbacks.setCitationBlockId!
     })
 
+    // 5. 向LLM发起流式对话，stream处理回调
     await fetchChatCompletion({
       messages: modelMessages,
       assistant: assistant,
@@ -195,6 +219,7 @@ export async function transformMessagesAndFetch(
       onChunkReceived
     })
   } catch (error: any) {
+    // 错误统一通过流chunk返回
     onChunkReceived({ type: ChunkType.ERROR, error })
   }
 }
