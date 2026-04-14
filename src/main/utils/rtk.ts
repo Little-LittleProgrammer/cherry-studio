@@ -145,27 +145,43 @@ async function checkRtkAvailable(): Promise<boolean> {
 }
 
 /**
- * Rewrite a shell command using rtk for token-optimized output.
- * Returns the rewritten command, or null if no rewrite is available.
+ * 使用 rtk 对 shell 命令进行改写，以获得更优的 token 化输出。
+ * 如果可用，将返回被改写后的命令，否则返回 null。
+ *
+ * 详细解释如下：
+ * 1. 首先，函数会通过 checkRtkAvailable 判断 rtk 工具是否可用（包括二进制存在和版本合格），以及 rtkPath 是否已解析可用。
+ *    - 如果 rtk 不可用或路径无效，则直接返回 null，表示无法重写命令。
+ * 2. 如果 rtk 可用，使用 execFileAsync 以异步方式运行 rtk 可执行文件，
+ *    传入 'rewrite' 以及目标命令字符串，并设定超时时间（REWRITE_TIMEOUT_MS）。
+ *    它会尝试让 rtk 对输入的命令进行改写。
+ * 3. 将 rtk 的标准输出（stdout）去除前后空白字符后，赋值给 rewritten。
+ * 4. 如果 rewritten 为空，或改写后的命令与原始命令完全一致，说明 rtk 并未进行有效改写，返回 null。
+ * 5. 若确实有改写，返回重写后的命令字符串。
+ * 6. 当 rtk 写作失败抛出异常（包含 rtk 工具返回 1，代表不可改写的正常情形），catch 子句将捕获该异常并返回 null。
  */
 export async function rtkRewrite(command: string): Promise<string | null> {
+  // 步骤 1：检查 rtk 工具是否可用，以及 rtkPath 是否有效
   if (!(await checkRtkAvailable()) || !rtkPath) {
     return null
   }
 
   try {
+    // 步骤 2：用 rtk 工具尝试将命令进行改写
     const { stdout } = await execFileAsync(rtkPath, ['rewrite', command], {
       timeout: REWRITE_TIMEOUT_MS
     })
+    // 步骤 3：处理输出，去除前后多余空白
     const rewritten = stdout.trim()
 
+    // 步骤 4：如果没有改写，或者改写结果和原始命令一致，返回 null
     if (!rewritten || rewritten === command) {
       return null
     }
 
+    // 步骤 5：返回重写后的命令
     return rewritten
   } catch {
-    // rtk rewrite exits 1 when there's no rewrite — expected behavior
+    // 步骤 6：捕获异常（包括正常的无可改写）
     return null
   }
 }

@@ -301,6 +301,9 @@ export const createPromptToolUsePlugin = (
       const providerDefinedTools: ToolSet = {}
       const promptTools: ToolSet = {}
 
+      // provider 类型的工具原生支持 function call 特性（如 OpenAI Function Calling 等），
+      // 因此直接保留在 tools 参数，由 LLM 以原生方式处理。
+      // 其他类型的工具需要通过 prompt 注入方式处理，不支持 function call。
       for (const [toolName, tool] of Object.entries(params.tools)) {
         if (tool.type === 'provider') {
           // provider 类型的工具保留在 tools 参数中

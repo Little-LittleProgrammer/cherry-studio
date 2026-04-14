@@ -509,10 +509,14 @@ class ClaudeCodeService implements AgentServiceInterface {
       env,
       // model: modelInfo.modelId,
       pathToClaudeCodeExecutable: this.claudeExecutablePath,
+      // 这个是用于生成和管理 Claude Code 子进程的函数。
+      // 它会根据当前环境变量和代理配置，通过 Node.js 的 fork 方法启动一个新的进程，
+      // 并设置好代理、环境变量、stderr 监听和错误记录等必要参数。
       spawnClaudeCodeProcess: (spawnOptions) => {
         const childEnv = { ...spawnOptions.env } as NodeJS.ProcessEnv
         let execArgv = process.execArgv
 
+        // 检查并注入代理设置（如果有）
         const activeProxyConfig = getNodeProxyConfigFromEnvironment(childEnv)
         if (activeProxyConfig) {
           const proxyProtocol = getProxyProtocol(activeProxyConfig.proxyRules)
@@ -527,6 +531,7 @@ class ClaudeCodeService implements AgentServiceInterface {
           execArgv = [...process.execArgv, '--disable-warning=UNDICI-EHPA', '--require', this.claudeProxyBootstrapPath]
         }
 
+        // 使用 fork 启动子进程，并配置参数
         const child = fork(spawnOptions.args[0], spawnOptions.args.slice(1), {
           cwd: spawnOptions.cwd,
           env: childEnv,
@@ -534,11 +539,15 @@ class ClaudeCodeService implements AgentServiceInterface {
           stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
           signal: spawnOptions.signal
         })
+
+        // 捕获子进程的标准错误输出，记录到日志和错误信息数组
         child.stderr?.on('data', (data: Buffer) => {
           const text = data.toString()
           logger.warn('claude stderr', { chunk: text })
           errorChunks.push(text)
         })
+
+        // 返回子进程对象（转为自定义类型）
         return child as unknown as SpawnedProcess
       },
       systemPrompt: assistantSystemPrompt
