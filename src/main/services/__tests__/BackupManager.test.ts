@@ -42,7 +42,8 @@ const { mockLogger } = vi.hoisted(() => ({
   mockLogger: {
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn()
+    error: vi.fn(),
+    debug: vi.fn()
   }
 }))
 
@@ -58,7 +59,9 @@ vi.mock('electron', () => ({
       if (key === 'temp') return '/tmp'
       if (key === 'userData') return '/mock/userData'
       return '/mock/unknown'
-    })
+    }),
+    relaunch: vi.fn(),
+    exit: vi.fn()
   }
 }))
 
@@ -66,25 +69,33 @@ vi.mock('fs-extra', () => ({
   default: {
     pathExists: vi.fn(),
     remove: vi.fn(),
+    rename: vi.fn(),
     ensureDir: vi.fn(),
     copy: vi.fn(),
     readdir: vi.fn(),
     stat: vi.fn(),
     readFile: vi.fn(),
+    readJson: vi.fn(),
     writeFile: vi.fn(),
     createWriteStream: vi.fn(),
     createReadStream: vi.fn()
   },
   pathExists: vi.fn(),
   remove: vi.fn(),
+  rename: vi.fn(),
   ensureDir: vi.fn(),
   copy: vi.fn(),
   readdir: vi.fn(),
   stat: vi.fn(),
   readFile: vi.fn(),
+  readJson: vi.fn(),
   writeFile: vi.fn(),
   createWriteStream: vi.fn(),
   createReadStream: vi.fn()
+}))
+
+vi.mock('@main/constant', () => ({
+  isWin: false
 }))
 
 vi.mock('../WindowService', () => ({
@@ -114,6 +125,7 @@ vi.mock('node-stream-zip', () => ({
 }))
 
 // Import after mocks
+import { app } from 'electron'
 import * as fs from 'fs-extra'
 
 import BackupManager from '../BackupManager'
@@ -307,5 +319,70 @@ describe('BackupManager.deleteLanTransferBackup - Security Tests', () => {
       // path.normalize handles double slashes
       expect(result).toBe(true)
     })
+  })
+})
+
+describe('BackupManager restore flow', () => {
+  let backupManager: BackupManager
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    backupManager = new BackupManager()
+  })
+
+  it('writes restored data into .restore directories before relaunching', async () => {
+    const restoreInternals = backupManager as unknown as {
+      onProgress: (...args: unknown[]) => (...args: unknown[]) => void
+      getDirSize: (dirPath: string) => Promise<number>
+      copyDirWithProgress: (source: string, destination: string, onProgress: (size: number) => void) => Promise<void>
+      restoreDirect: () => Promise<void>
+    }
+
+    vi.spyOn(restoreInternals, 'onProgress').mockReturnValue(vi.fn())
+
+    vi.mocked(fs.readJson).mockResolvedValue({
+      appName: 'Cherry Studio',
+      platform: 'darwin'
+    } as never)
+    vi.mocked(fs.pathExists)
+      .mockResolvedValueOnce(true as never)
+      .mockResolvedValueOnce(true as never)
+      .mockResolvedValueOnce(true as never)
+    vi.mocked(fs.readdir).mockResolvedValue(['settings.json'] as never)
+    vi.mocked(fs.remove).mockResolvedValue(undefined as never)
+    vi.mocked(fs.copy).mockResolvedValue(undefined as never)
+
+    vi.spyOn(restoreInternals, 'getDirSize').mockResolvedValue(0)
+    vi.spyOn(restoreInternals, 'copyDirWithProgress').mockResolvedValue(undefined)
+
+    await restoreInternals.restoreDirect()
+
+    expect(fs.remove).toHaveBeenCalledWith('/mock/userData/IndexedDB.restore')
+    expect(fs.copy).toHaveBeenCalledWith('/tmp/cherry-studio/backup/temp/IndexedDB', '/mock/userData/IndexedDB.restore')
+    expect(fs.remove).toHaveBeenCalledWith('/mock/userData/Local Storage.restore')
+    expect(fs.copy).toHaveBeenCalledWith(
+      '/tmp/cherry-studio/backup/temp/Local Storage',
+      '/mock/userData/Local Storage.restore'
+    )
+    expect(fs.remove).toHaveBeenCalledWith('/mock/userData/Data.restore')
+    expect(app.relaunch).toHaveBeenCalled()
+    expect(app.exit).toHaveBeenCalledWith(0)
+  })
+
+  it('swaps .restore directories into place on startup', async () => {
+    vi.mocked(fs.pathExists)
+      .mockResolvedValueOnce(true as never)
+      .mockResolvedValueOnce(true as never)
+      .mockResolvedValueOnce(true as never)
+    vi.mocked(fs.remove).mockResolvedValue(undefined as never)
+
+    await BackupManager.handleStartupRestore()
+
+    expect(fs.remove).toHaveBeenCalledWith('/mock/userData/IndexedDB')
+    expect(fs.remove).toHaveBeenCalledWith('/mock/userData/Local Storage')
+    expect(fs.remove).toHaveBeenCalledWith('/mock/data')
+    expect(fs.rename).toHaveBeenCalledWith('/mock/userData/IndexedDB.restore', '/mock/userData/IndexedDB')
+    expect(fs.rename).toHaveBeenCalledWith('/mock/userData/Local Storage.restore', '/mock/userData/Local Storage')
+    expect(fs.rename).toHaveBeenCalledWith('/mock/data.restore', '/mock/data')
   })
 })

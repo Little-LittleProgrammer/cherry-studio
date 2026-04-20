@@ -6,10 +6,9 @@
 
 - 管理 Electron 生命周期
 - 创建和管理窗口
-- 暴露系统能力
-- 注册 IPC 处理器
-- 托管长生命周期服务
-- 处理本地数据、文件、协议、MCP、追踪、更新、备份
+- 注册 IPC、协议和高权限能力
+- 托管 MCP、知识库、Agent、备份、传输、Trace 等长期运行服务
+- 维护本地文件、配置、日志和 API Server
 
 ## 结构概览
 
@@ -17,58 +16,57 @@
 src/main/
 ├── index.ts
 ├── ipc.ts
-├── services/
 ├── apiServer/
-├── mcpServers/
-├── knowledge/
+├── configs/
 ├── integration/
+├── knowledge/
+├── mcpServers/
+├── services/
 ├── utils/
-└── configs/
+└── constant.ts
 ```
 
 ## 启动入口 `index.ts`
 
-主进程入口的核心动作包括：
+`src/main/index.ts` 当前承担的是“应用级编排”：
 
-- 加载 `./bootstrap`
-- 加载 `@main/config`
-- 初始化崩溃报告
-- 根据设置调整硬件加速和平台特性
-- 申请单实例锁
-- `app.whenReady()` 后依次初始化窗口、托盘、菜单、追踪、分析、快捷键、IPC、选择助手和 API Server
+- 加载 `bootstrap` 和 `@main/config`
+- 初始化 crash reporter、平台命令行参数、单实例锁
+- 处理备份恢复与版本记录
+- 创建主窗口、托盘、菜单
+- 初始化 Trace、Analytics、PowerMonitor、快捷键、IPC
+- 处理 deep link、选择助手、本地传输发现
+- 启动内置 Agent、API Server、Scheduler 与渠道适配器
 
-从这里可以看出：项目把“应用级初始化编排”集中放在一个入口，不把这些逻辑分散到窗口创建或页面加载里。
+这里集中的是时序和依赖关系，而不是零散的业务逻辑。
 
 ## `WindowService`：窗口中心
 
-`src/main/services/WindowService.ts` 是窗口系统的核心：
+`src/main/services/WindowService.ts` 是窗口系统核心，负责：
 
-- 创建主窗口和 miniWindow
-- 统一设置 `BrowserWindow` 参数
-- 注入 preload
-- 管理窗口状态恢复
-- 处理最大化、全屏、缩放、上下文菜单
-- 监听渲染进程 crash 并决定 reload 或退出
+- 创建主窗口与迷你窗口
+- 设置 `BrowserWindow` 参数和 preload
+- 恢复窗口状态
+- 控制显示、隐藏、最大化、全屏、缩放
+- 处理崩溃和上下文菜单
 
-这意味着窗口不是随手 new 出来，而是被统一建模。
+项目里的窗口不是“随手 new 出来”，而是统一经由服务管理。
 
 ## `ipc.ts`：桌面能力汇聚点
 
-`src/main/ipc.ts` 是主进程能力的总暴露层，集中注册 `ipcMain.handle(...)`。
+`src/main/ipc.ts` 集中注册 `ipcMain.handle(...)`，把 preload 暴露的 API 路由到主进程服务。
 
-这里的 handler 覆盖：
+当前覆盖的能力非常广，包括：
 
-- 应用设置与生命周期
-- 文件与目录操作
-- 备份恢复
-- MCP 调用
-- 通知
-- 窗口控制
-- 知识库操作
-- OCR / Python / Webview / VertexAI 等集成能力
-- API Server 状态管理
+- 应用设置、主题、更新、代理、字体、权限
+- 文件与目录操作、缓存清理、导入导出
+- 备份恢复、WebDAV、S3、本地传输
+- MCP 调用与日志
+- 知识库与记忆
+- OCR、Python、Code Tools、Webview、Vertex AI
+- Agent 消息持久化、Trace、通知、窗口控制
 
-这层的作用相当于“桌面内部 API 网关”。
+这层相当于 Cherry Studio 的“桌面内部 API 网关”。
 
 ## 主要服务分组
 
@@ -76,10 +74,12 @@ src/main/
 
 - `WindowService`
 - `TrayService`
+- `AppMenuService`
 - `ShortcutService`
 - `ThemeService`
 - `ProtocolClient`
 - `PowerMonitorService`
+- `VersionService`
 
 ### 数据与文件类
 
@@ -87,38 +87,41 @@ src/main/
 - `FileSystemService`
 - `BackupManager`
 - `StoreSyncService`
+- `ExportService`
+- `ObsidianVaultService`
 
-### AI 与知识类
-
-- `KnowledgeService`
-- `MemoryService`
-- `AnthropicService`
-- `CopilotService`
-- `OpenClawService`
-- `PythonService`
-
-### 集成与基础设施类
+### AI 与产品能力类
 
 - `MCPService`
+- `KnowledgeService`
+- `memory/MemoryService`
+- `OpenClawService`
+- `CodeToolsService`
+- `PythonService`
+- `SearchService`
+- `VertexAIService`
+- `CopilotService`
+
+### 基础设施与集成类
+
 - `ApiServerService`
 - `NodeTraceService`
 - `AnalyticsService`
+- `ProxyManager`
+- `NotificationService`
+- `LocalTransferService`
+- `lanTransfer/*`
+- `ExternalAppsService`
 
-## API Server 为什么在主进程里
+## Agent 子系统
 
-`src/main/index.ts` 里会在后台尝试启动 `apiServerService`。这样做有两个原因：
+`src/main/services/agents/` 是独立子系统，当前主要包含：
 
-- API Server 依赖本地配置、agents 数据和系统资源，属于桌面宿主能力。
-- 即使前端页面没有主动发请求，主进程也可以基于配置和 agent 存在情况决定是否启动它。
+- `database/`：Drizzle schema、repository、迁移
+- `services/`：Agent、Session、Scheduler、Claude Code、Channels、CherryClaw、安全控制
+- `skills/`：技能安装与管理
 
-## agents 子系统
-
-`src/main/services/agents/` 使用 Drizzle ORM + SQLite 管理 agent、session、message 等数据。它属于主进程域，而不是前端 Dexie 域。
-
-这套设计说明项目把“用户界面状态”和“agent 业务实体”分开存储：
-
-- 前者偏 UI 和本地体验
-- 后者偏可管理、可校验、可服务化的数据模型
+这部分数据由主进程托管，和前端 Dexie/Redux 状态分开。
 
 ## 主进程内聚图
 
@@ -128,11 +131,11 @@ flowchart TB
   IPC[ipc.ts]
   Win[WindowService]
   MCP[MCPService]
-  API[ApiServerService]
   KB[KnowledgeService]
+  Agents[agents/*]
+  API[ApiServerService]
   Trace[NodeTraceService]
-  Agents[agents/]
-  File[File/Backup Services]
+  File[File / Backup / Transfer]
 
   Entry --> Win
   Entry --> IPC
@@ -140,15 +143,13 @@ flowchart TB
   Entry --> API
   IPC --> MCP
   IPC --> KB
-  IPC --> File
   IPC --> Agents
+  IPC --> File
 ```
 
-## 设计原理
+## 设计原则
 
-主进程遵循的是“系统能力集中、前端最小授权”原则：
-
-- 不让渲染进程直接接触 Node 或 Electron 高权限 API。
-- 高权限逻辑先在主进程建模为服务，再通过 IPC 精准暴露。
-- 跨页面、跨窗口、跨会话都需要长期持有的资源，由主进程掌控。
-
+- 高权限逻辑先在主进程建模成服务，再通过 IPC 精准暴露。
+- 需要跨窗口、跨会话、跨进程长期存在的资源，由主进程持有。
+- 渲染进程不直接接触 Node 或 Electron 高权限接口。
+- 新功能优先复用现有服务，不在 `ipc.ts` 里堆业务逻辑。

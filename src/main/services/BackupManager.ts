@@ -541,8 +541,8 @@ class BackupManager {
 
   /**
    * Restore from direct backup format (version 6+)
-   * Directly replaces IndexedDB and Local Storage directories.
-   * On Windows, uses .restore suffix to avoid file lock issues - handled on next startup.
+   * Writes restored IndexedDB / Local Storage / Data into *.restore directories.
+   * The swap to live directories is completed on next startup to avoid touching active files.
    */
   private async restoreDirect(): Promise<void> {
     const onProgress = this.onProgress(IpcChannel.RestoreProgress, true)
@@ -570,10 +570,9 @@ class BackupManager {
 
       const userDataPath = app.getPath('userData')
 
-      // Restore IndexedDB and Local Storage
-      // On Windows, use .restore suffix to avoid file lock issues - handled on next startup
-      // On macOS/Linux, use direct replacement
-      const restoreSuffix = isWin ? '.restore' : ''
+      // Restore into *.restore directories on every platform so the next launch can
+      // atomically swap them into place after the current app has fully exited.
+      const restoreSuffix = '.restore'
 
       // IndexedDB & Local Storage Path
       const indexedDBSource = path.join(this.tempDir, 'IndexedDB')
@@ -583,9 +582,7 @@ class BackupManager {
 
       logger.debug('[restoreDirect] Restoring database directories...')
 
-      // Windows: copy to .restore suffix directories (swap happens on next startup)
-      // macOS/Linux: copy directly to target directories
-      // Always remove target directory first to ensure clean overwrite
+      // Always remove the staged target directory first to ensure a clean overwrite.
       if (await fs.pathExists(indexedDBSource)) {
         await fs.remove(indexedDBDest).catch(() => {})
         await fs.copy(indexedDBSource, indexedDBDest)

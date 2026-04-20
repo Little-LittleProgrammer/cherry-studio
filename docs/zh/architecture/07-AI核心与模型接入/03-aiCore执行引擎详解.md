@@ -9,7 +9,7 @@ flowchart LR
   Input[调用参数]
   Runtime[runtime/executor]
   Models[models/ModelResolver]
-  Providers[providers/Registry + Hub]
+  Providers[providers/ExtensionRegistry + ProviderExtension]
   Plugins[plugins/PluginManager + Engine]
   Options[options/factory]
   SDK[AI SDK]
@@ -82,7 +82,7 @@ flowchart LR
 
 - `packages/aiCore/src/core/providers/core/ExtensionRegistry.ts` — 扩展注册中心与全局单例
 - `packages/aiCore/src/core/providers/core/ProviderExtension.ts` — Provider 实例化与 LRU 缓存
-- `packages/aiCore/src/core/providers/core/initialization.ts` — 17 个核心 Provider Extension 定义与自动注册
+- `packages/aiCore/src/core/providers/core/initialization.ts` — 内核级 Provider Extension 定义与自动注册
 
 核心能力：
 
@@ -92,21 +92,19 @@ flowchart LR
 4. **ToolFactory 机制**：Provider 可声明 `webSearch`、`urlContext`、`codeExecution`、`fileSearch` 等能力，通过 `resolveToolCapability()` 解析，支持 aggregator fallback。
 5. **alias 管理**：支持别名注册、真实 ID 反查。`parseProviderId()` 解析完整 ID 如 `openai-chat` 为 `{baseId: 'openai', mode: 'chat', isVariant: true}`。
 
-当前 17 个核心 Extension：
+当前 `initialization.ts` 负责注册一组内核级 Extension，渲染侧还会按产品需要补充更多扩展。理解这一层时重点看“注册机制”和“variant/toolFactory 约定”，不要把某个时刻的扩展数量当成稳定契约。
 
-| Extension | Aliases | Variants | Tool Factories |
-|-----------|---------|----------|----------------|
-| Anthropic | `claude` | - | webSearch (`webSearch_20260209`), urlContext (`webFetch_20260209`) |
-| Azure | - | `responses`, `anthropic`（Azure 托管 Claude，带 `/anthropic/v1` 路径） | - |
-| CherryIn | - | `chat` | - |
-| DeepSeek | - | - | - |
-| Google | `google-ai`, `gemini`, `google-gemini` | - | webSearch, urlContext |
-| OpenAICompatible | - | - | - |
-| OpenAI | `openai-response` | `chat`（`resolveModel: provider.chat(modelId)`） | - |
-| OpenRouter | `tokenflux` | - | webSearch（传递 providerOptions） |
-| Xai | `grok` | `responses` | webSearch, xSearch |
+示例：
 
-以及渲染侧注册的 15+ 扩展：GoogleVertex、GoogleVertexAnthropic、GitHubCopilot、Bedrock、Perplexity、Mistral、HuggingFace、Gateway、Cerebras、Ollama、AiHubMix、NewAPI、Voyage、TogetherAI、Groq。
+| Extension | 说明 |
+|-----------|------|
+| `anthropic` | 支持 alias、tool factory 与模型解析 |
+| `azure` | 通过 variant 区分不同托管协议 |
+| `google` | 同时声明模型解析与搜索相关能力 |
+| `openai` | 通过 variant 兼容不同接口形态 |
+| `openai-compatible` | 承接用户自定义兼容 Provider |
+
+渲染侧还会在 `src/renderer/src/aiCore/provider/extensions/` 注册产品层补充扩展，例如 Vertex、Bedrock、Copilot、Ollama、Perplexity、Groq 等。具体名单以当前源码为准。
 
 **Variant 类型安全**：`ProviderVariant<TSettings, TProvider, TOutput>` 增加 `TOutput` 泛型，使 `transform` 输出类型流转到 `toolFactories` 和 `resolveModel`，修复了 azure-anthropic 的 `provider.tools.webSearchPreview is not a function` 问题（#14087）。
 
