@@ -182,6 +182,34 @@ ${result}
 
 /**
  * 默认的系统提示符构建函数（提取自 Cherry Studio）
+ *
+ * 举例：完整的通讯过程如下（假设用户想查询上海和广州的人口，并比较人口数量）：
+ *
+ * User: 上海和广州哪个人口多？
+ *
+ * A: 我可以使用搜索工具查询广州的人口。
+ * <tool_use>
+ *   <name>search</name>
+ *   <arguments>{"query": "人口 广州"}</arguments>
+ * </tool_use>
+ *
+ * User: <tool_use_result>
+ *   <name>search</name>
+ *   <result>广州截至2021年人口为15万。</result>
+ * </tool_use_result>
+ *
+ * A: 我可以使用搜索工具查询上海的人口。
+ * <tool_use>
+ *   <name>search</name>
+ *   <arguments>{"query": "人口 上海"}</arguments>
+ * </tool_use>
+ *
+ * User: <tool_use_result>
+ *   <name>search</name>
+ *   <result>上海2019年人口为26万。</result>
+ * </tool_use_result>
+ *
+ * A: 上海人口为26万，而广州为15万，因此上海人口更多。
  */
 function defaultBuildSystemPrompt(userSystemPrompt: string, tools: ToolSet, mcpMode?: string): string {
   const availableTools = buildAvailableTools(tools)
@@ -376,6 +404,25 @@ export const createPromptToolUsePlugin = (
 
       type TOOLS = NonNullable<typeof context.mcpTools>
       return new TransformStream<TextStreamPart<TOOLS>, TextStreamPart<TOOLS>>({
+        /**
+         * 该 transform 函数为 TransformStream 的 transform 方法，用于处理 AI 推理过程中的流式文本输出。
+         *
+         * 输入：
+         *   chunk: TextStreamPart<TOOLS>
+         *     - AI 推理模型输出的数据分片，类型包括 'text-start'、'text-delta'、'text-end'、'finish-step' 等。
+         *   controller: TransformStreamDefaultController<TextStreamPart<TOOLS>>
+         *     - 可用于向下游输出 filtered/变换后的数据分片。
+         *
+         * 作用：
+         *   - 持有 text-start，直到检测到有非工具标签的文本内容出现再发送。
+         *   - 对 text-delta 类型的文本分片进行工具标签提取过滤，只将非工具内容透传给 UI 层。
+         *   - 处理 text-end 只在已经发送过 text-start 的情况下才发送。
+         *   - 在 finish-step 时统一处理工具调用逻辑。
+         *
+         * 输出：
+         *   通过 controller.enqueue(filteredChunk) 推送被工具标签过滤后的内容，
+         *   以保证前端 UI 接收的内容为纯自然语言部分或按流程处理的分片。
+         */
         async transform(
           chunk: TextStreamPart<TOOLS>,
           controller: TransformStreamDefaultController<TextStreamPart<TOOLS>>

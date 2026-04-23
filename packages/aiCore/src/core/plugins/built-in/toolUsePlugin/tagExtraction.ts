@@ -54,6 +54,14 @@ export interface TagExtractionResult {
 /**
  * 通用标签提取处理器
  * 可以处理各种形式的标签对，如 <think>...</think>, <tool_use>...</tool_use> 等
+ *
+ * 示例:
+ * 输入: "一些文本<think>这是标签内容</think>其他内容"
+ * 输出: [
+ *   { content: "一些文本", isTagContent: false, complete: true },
+ *   { content: "这是标签内容", isTagContent: true, complete: true, tagContentExtracted: "这是标签内容" },
+ *   { content: "其他内容", isTagContent: false, complete: true }
+ * ]
  */
 export class TagExtractor {
   private config: TagConfig
