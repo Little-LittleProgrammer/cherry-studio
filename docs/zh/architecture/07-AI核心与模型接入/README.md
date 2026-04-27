@@ -8,6 +8,7 @@
 - Provider Extension 注册与产品侧 Provider 适配
 - 工具调用、Web Search、MCP、知识库与长期记忆
 - Agent / Claude Code / CherryClaw 链路
+- 多渠道 IM 接入 (飞书/Slack/Telegram/微信/QQ/Discord) 与安全机制
 - Trace、日志与调试入口
 
 ## 建议阅读顺序
@@ -26,6 +27,7 @@
 12. [11-提示词全集](./11-提示词全集.md)
 13. [12-用户问题解答](./12-用户问题解答.md)
 14. [13-AI Agent工程面试Q&A](./13-AI Agent工程面试Q&A.md)
+15. [14-IM多渠道接入](./14-IM多渠道接入.md)
 
 ## 全景图
 

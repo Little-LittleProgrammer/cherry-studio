@@ -36,6 +36,7 @@ flowchart LR
 - `streamText`
 - `generateText`
 - `generateImage`
+- `embedMany`
 
 `RuntimeExecutor` 关键特性：
 
@@ -43,6 +44,8 @@ flowchart LR
 2. 自动注入内部插件（模型解析、上下文配置）。
 3. 将插件执行与 AI SDK 原生调用整合为统一流程。
 4. 文本、图像请求走统一生命周期，但图像模型会单独走图像模型解析与错误封装。
+5. 支持 `embedMany` 批量嵌入，通过 `registry.embeddingModel()` 解析模型，无需单独的 chat completion 流程。
+6. `createOpenAICompatibleExecutor` 提供 OpenAI 兼容 provider 的快速创建路径，跳过通用 `createExecutor` 的 providerId 解析步骤，直接创建优化后的执行器。
 
 ## 2. models：模型类型与版本守卫
 
@@ -58,12 +61,14 @@ flowchart LR
 
 当前内核侧实际覆盖的模型类型包括：
 
-- Language Model
-- Image Model
-- Embedding Model
-- Reranking Model
-- Speech Model
-- Transcription Model
+- **Language Model** — 文本聊天/补全，通过 `streamText`/`generateText` 执行，涉及 messages、tools、reasoning、finish reason、usage 等语义
+- **Image Model** — 图像生成/编辑，通过 `generateImage` 执行，涉及提示词、尺寸/质量、URL/Base64 图像结果
+- **Embedding Model** — 文本向量化，通过 `embedMany` 执行，输入文本数组输出向量数组，用于知识库记忆系统的向量检索
+- **Reranking Model** — 搜索重排序，运行在知识库系统的重排器层，对初步搜索结果进行二次排序
+- **Speech Model** — 语音合成，将文本转换为语音输出
+- **Transcription Model** — 语音识别，将音频输入转录为文本
+
+注意：当前 aiCore 核心包只直接支持 Language、Image、Embedding 三种模型类型的执行（streamText/generateText、generateImage、embedMany），Reranking、Speech、Transcription 的协议适配主要由渲染层编排和主进程知识库/语音服务完成。
 
 典型解析规则：
 
@@ -92,7 +97,7 @@ flowchart LR
 4. **ToolFactory 机制**：Provider 可声明 `webSearch`、`urlContext`、`codeExecution`、`fileSearch` 等能力，通过 `resolveToolCapability()` 解析，支持 aggregator fallback。
 5. **alias 管理**：支持别名注册、真实 ID 反查。`parseProviderId()` 解析完整 ID 如 `openai-chat` 为 `{baseId: 'openai', mode: 'chat', isVariant: true}`。
 
-当前 `initialization.ts` 负责注册一组内核级 Extension，渲染侧还会按产品需要补充更多扩展。理解这一层时重点看“注册机制”和“variant/toolFactory 约定”，不要把某个时刻的扩展数量当成稳定契约。
+当前 `initialization.ts` 负责注册 9 个内核级 Extension（OpenAI、Anthropic、Azure、Google、xAI、DeepSeek、OpenRouter、OpenAI Compatible、CherryIn），渲染侧还会按产品需要补充 15 个扩展（Vertex、Bedrock、Copilot、Ollama、Perplexity、Groq 等）。理解这一层时重点看”注册机制”和”variant/toolFactory 约定”，不要把某个时刻的扩展数量当成稳定契约。
 
 示例：
 
