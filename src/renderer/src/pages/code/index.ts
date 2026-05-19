@@ -154,6 +154,8 @@ export const generateToolEnvironment = ({
 
   switch (tool) {
     case codeTools.claudeCode: {
+      // https://code.claude.com/docs/en/env-vars
+      env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1'
       env.ANTHROPIC_BASE_URL =
         getCodeToolsApiBaseUrl(model, 'anthropic') || modelProvider.anthropicApiHost || modelProvider.apiHost
       env.ANTHROPIC_MODEL = model.id
@@ -180,11 +182,10 @@ export const generateToolEnvironment = ({
       env.OPENAI_MODEL = model.id
       break
     case codeTools.openaiCodex:
-      env.OPENAI_API_KEY = apiKey
-      env.OPENAI_BASE_URL = formattedBaseUrl
-      env.OPENAI_MODEL = model.id
-      env.OPENAI_MODEL_PROVIDER = modelProvider.id
-      env.OPENAI_MODEL_PROVIDER_NAME = modelProvider.name
+      env.CHERRY_CODEX_API_KEY = apiKey
+      env.CHERRY_CODEX_BASE_URL = formattedBaseUrl
+      env.CHERRY_CODEX_PROVIDER_ID = modelProvider.id
+      env.CHERRY_CODEX_PROVIDER_NAME = sanitizeProviderName(getFancyProviderName(modelProvider))
       break
 
     case codeTools.iFlowCli:
@@ -235,6 +236,10 @@ export const generateToolEnvironment = ({
         env.OPENCODE_PROVIDER_NAME = providerName
         const envVarKey = `OPENCODE_API_KEY_${providerName.toUpperCase().replace(/[-.]/g, '_')}`
         env[envVarKey] = apiKey
+        // opencode's auto-update check can't detect Cherry Studio's bun install,
+        // causing a confusing "Update Available" dialog that always fails.
+        // Cherry Studio manages opencode updates via its own autoUpdateToLatest.
+        env.OPENCODE_DISABLE_AUTOUPDATE = 'true'
       }
       break
   }

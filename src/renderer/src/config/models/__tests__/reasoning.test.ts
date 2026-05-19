@@ -425,6 +425,9 @@ describe('DeepSeek V4+ Models', () => {
       expect(isDeepSeekV4PlusModel(createModel({ id: 'prefix-deepseek-v4-flash' }))).toBe(true)
       expect(isDeepSeekV4PlusModel(createModel({ id: 'agent/deepseek-v4-pro' }))).toBe(true)
       expect(isDeepSeekV4PlusModel(createModel({ id: 'accounts/fireworks/models/deepseek-v4-pro' }))).toBe(true)
+      expect(isDeepSeekV4PlusModel(createModel({ id: 'deepseek/deepseek-v4-flash:deepseek' }))).toBe(true)
+      expect(isDeepSeekV4PlusModel(createModel({ id: 'deepseek/deepseek-v4-pro:fireworks' }))).toBe(true)
+      expect(isDeepSeekV4PlusModel(createModel({ id: 'deepseek/deepseek-v4-pro:deepseek:together' }))).toBe(true)
     })
 
     it('is case insensitive', () => {
@@ -471,6 +474,9 @@ describe('DeepSeek V4+ Models', () => {
       expect(getThinkModelType(createModel({ id: 'deepseek-v4' }))).toBe('deepseek_v4')
       expect(getThinkModelType(createModel({ id: 'deepseek-v4-flash' }))).toBe('deepseek_v4')
       expect(getThinkModelType(createModel({ id: 'deepseek-v4-pro' }))).toBe('deepseek_v4')
+      expect(getThinkModelType(createModel({ id: 'deepseek/deepseek-v4-flash:deepseek' }))).toBe('deepseek_v4')
+      expect(getThinkModelType(createModel({ id: 'deepseek/deepseek-v4-pro:fireworks' }))).toBe('deepseek_v4')
+      expect(getThinkModelType(createModel({ id: 'deepseek/deepseek-v4-pro:deepseek:together' }))).toBe('deepseek_v4')
       expect(getThinkModelType(createModel({ id: 'deepseek-v5' }))).toBe('deepseek_v4')
       expect(getThinkModelType(createModel({ id: 'deepseek-v10-ultra' }))).toBe('deepseek_v4')
     })
@@ -505,6 +511,21 @@ describe('DeepSeek V4+ Models', () => {
       ).toEqual(['default', 'none', 'high', 'xhigh'])
       expect(
         getModelSupportedReasoningEffortOptions(createModel({ id: 'deepseek-v4-pro', provider: 'openrouter' }))
+      ).toEqual(['default', 'none', 'high', 'xhigh'])
+      expect(
+        getModelSupportedReasoningEffortOptions(
+          createModel({ id: 'deepseek/deepseek-v4-flash:deepseek', provider: 'deepseek' })
+        )
+      ).toEqual(['default', 'none', 'high', 'xhigh'])
+      expect(
+        getModelSupportedReasoningEffortOptions(
+          createModel({ id: 'deepseek/deepseek-v4-pro:fireworks', provider: 'deepseek' })
+        )
+      ).toEqual(['default', 'none', 'high', 'xhigh'])
+      expect(
+        getModelSupportedReasoningEffortOptions(
+          createModel({ id: 'deepseek/deepseek-v4-pro:deepseek:together', provider: 'deepseek' })
+        )
       ).toEqual(['default', 'none', 'high', 'xhigh'])
       expect(getModelSupportedReasoningEffortOptions(createModel({ id: 'deepseek-v5', provider: 'deepseek' }))).toEqual(
         ['default', 'none', 'high', 'xhigh']
@@ -648,6 +669,7 @@ describe('Reasoning effort helpers', () => {
   it('aggregates other reasoning effort families', () => {
     expect(isSupportedReasoningEffortModel(createModel({ id: 'o3' }))).toBe(true)
     expect(isSupportedReasoningEffortModel(createModel({ id: 'grok-3-mini' }))).toBe(true)
+    expect(isSupportedReasoningEffortModel(createModel({ id: 'grok-4.3' }))).toBe(true)
     expect(isSupportedReasoningEffortModel(createModel({ id: 'sonar-deep-research', provider: 'perplexity' }))).toBe(
       true
     )
@@ -656,6 +678,7 @@ describe('Reasoning effort helpers', () => {
 
   it('flags grok specific helpers correctly', () => {
     expect(isSupportedReasoningEffortGrokModel(createModel({ id: 'grok-3-mini' }))).toBe(true)
+    expect(isSupportedReasoningEffortGrokModel(createModel({ id: 'grok-4.3' }))).toBe(true)
     expect(
       isSupportedReasoningEffortGrokModel(createModel({ id: 'grok-4-fast-openrouter', provider: 'openrouter' }))
     ).toBe(true)
@@ -896,6 +919,11 @@ describe('getThinkModelType - Comprehensive Coverage', () => {
     it('should return gemini3_1_pro for Gemini 3.1 Pro models', () => {
       expect(getThinkModelType(createModel({ id: 'gemini-3.1-pro-preview' }))).toBe('gemini3_1_pro')
       expect(getThinkModelType(createModel({ id: 'gemini-pro-latest' }))).toBe('gemini3_1_pro')
+    })
+
+    it('should return gemma4_hosted for hosted Gemma 4 models on Gemini provider', () => {
+      expect(getThinkModelType(createModel({ id: 'gemma-4-31b-it', provider: 'gemini' }))).toBe('gemma4_hosted')
+      expect(getThinkModelType(createModel({ id: 'google/gemma-4-e2b-it', provider: 'gemini' }))).toBe('gemma4_hosted')
     })
   })
 
@@ -1381,6 +1409,21 @@ describe('Gemini Models', () => {
           group: ''
         })
       ).toBe(false)
+    })
+
+    it('should return true for hosted gemma 4 models on Gemini provider', () => {
+      expect(isSupportedThinkingTokenGeminiModel(createModel({ id: 'gemma-4-31b-it', provider: 'gemini' }))).toBe(true)
+      expect(
+        isSupportedThinkingTokenGeminiModel(createModel({ id: 'google/gemma-4-e2b-it', provider: 'gemini' }))
+      ).toBe(true)
+    })
+
+    it('should keep non-Gemini Gemma 4 ids out of Gemini thinking token detection', () => {
+      expect(isSupportedThinkingTokenGeminiModel(createModel({ id: 'gemma-4-31b-it', provider: 'openrouter' }))).toBe(
+        false
+      )
+      expect(isSupportedThinkingTokenGeminiModel(createModel({ id: 'gemma4:31b' }))).toBe(false)
+      expect(isSupportedThinkingTokenGeminiModel(createModel({ id: 'gemma4:e2b' }))).toBe(false)
     })
   })
 
@@ -2100,6 +2143,16 @@ describe('getModelSupportedReasoningEffortOptions', () => {
         getModelSupportedReasoningEffortOptions(createModel({ id: 'grok-4-fast', provider: 'openrouter' }))
       ).toEqual(['default', 'none', 'auto'])
     })
+
+    it('should return correct options for Grok 4.3', () => {
+      expect(getModelSupportedReasoningEffortOptions(createModel({ id: 'grok-4.3' }))).toEqual([
+        'default',
+        'none',
+        'low',
+        'medium',
+        'high'
+      ])
+    })
   })
 
   describe('Gemini models', () => {
@@ -2162,6 +2215,12 @@ describe('getModelSupportedReasoningEffortOptions', () => {
         'low',
         'high'
       ])
+    })
+
+    it('should return minimal/high options for hosted Gemma 4 on Gemini provider', () => {
+      expect(
+        getModelSupportedReasoningEffortOptions(createModel({ id: 'gemma-4-31b-it', provider: 'gemini' }))
+      ).toEqual(['default', 'minimal', 'high'])
     })
   })
 
@@ -3034,6 +3093,19 @@ describe('Gemma 4 Models', () => {
 
     it('still returns correct limits for earlier Gemma reasoning models', () => {
       expect(findTokenLimit('gemma-3-27b')).toBeUndefined()
+    })
+  })
+
+  describe('thinking controls', () => {
+    it('treats hosted Gemma 4 as configurable minimal/high reasoning instead of fixed reasoning', () => {
+      const model = createModel({
+        id: 'gemma-4-31b-it',
+        provider: 'gemini'
+      })
+
+      expect(isFixedReasoningModel(model)).toBe(false)
+      expect(getThinkModelType(model)).toBe('gemma4_hosted')
+      expect(getModelSupportedReasoningEffortOptions(model)).toEqual(['default', 'minimal', 'high'])
     })
   })
 })

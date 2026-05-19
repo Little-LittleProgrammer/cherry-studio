@@ -64,12 +64,17 @@ export const MODEL_SUPPORTED_REASONING_EFFORT = {
   gpt_oss: ['low', 'medium', 'high'] as const,
   grok: ['low', 'high'] as const,
   grok4_fast: ['auto'] as const,
+  grok_4_3: ['none', 'low', 'medium', 'high'] as const,
   gemini2_flash: ['low', 'medium', 'high', 'auto'] as const,
   gemini2_pro: ['low', 'medium', 'high', 'auto'] as const,
   // Also Gemini 3.1 Flash(-lite)
   gemini3_flash: ['minimal', 'low', 'medium', 'high'] as const,
   gemini3_pro: ['low', 'high'] as const,
   gemini3_1_pro: ['low', 'medium', 'high'] as const,
+  // Google-hosted Gemma 4 documents `minimal` as the closest supported near-off
+  // setting for most requests, but does not guarantee thinking is fully disabled.
+  // Keep the formal UI options aligned with the API guarantee and omit `none`.
+  gemma4_hosted: ['minimal', 'high'] as const,
   qwen: ['low', 'medium', 'high'] as const,
   qwen_thinking: ['low', 'medium', 'high'] as const,
   doubao: ['auto', 'high'] as const,
@@ -106,11 +111,13 @@ export const MODEL_SUPPORTED_OPTIONS: ThinkingOptionConfig = {
   gpt_oss: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gpt_oss] as const,
   grok: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.grok] as const,
   grok4_fast: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.grok4_fast] as const,
+  grok_4_3: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.grok_4_3] as const,
   gemini2_flash: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.gemini2_flash] as const,
   gemini2_pro: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gemini2_pro] as const,
   gemini3_flash: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gemini3_flash] as const,
   gemini3_pro: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gemini3_pro] as const,
   gemini3_1_pro: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gemini3_1_pro] as const,
+  gemma4_hosted: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.gemma4_hosted] as const,
   qwen: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.qwen] as const,
   qwen_thinking: ['default', ...MODEL_SUPPORTED_REASONING_EFFORT.qwen_thinking] as const,
   doubao: ['default', 'none', ...MODEL_SUPPORTED_REASONING_EFFORT.doubao] as const,
@@ -174,10 +181,14 @@ const _getThinkModelType = (model: Model): ThinkingModelType => {
     thinkingModelType = 'gpt_oss'
   } else if (isSupportedReasoningEffortOpenAIModel(model)) {
     thinkingModelType = 'o'
+  } else if (isGrok43Model(model)) {
+    thinkingModelType = 'grok_4_3'
   } else if (isGrok4FastReasoningModel(model)) {
     thinkingModelType = 'grok4_fast'
   } else if (isSupportedThinkingTokenGeminiModel(model)) {
-    if (isGemini3FlashModel(model) || isGemini31FlashLiteModel(model)) {
+    if (isHostedGemma4ThinkingModel(model)) {
+      thinkingModelType = 'gemma4_hosted'
+    } else if (isGemini3FlashModel(model) || isGemini31FlashLiteModel(model)) {
       thinkingModelType = 'gemini3_flash'
     } else if (isGemini3ProModel(model)) {
       thinkingModelType = 'gemini3_pro'
@@ -339,6 +350,10 @@ export function isSupportedReasoningEffortGrokModel(model?: Model): boolean {
     return false
   }
 
+  if (isGrok43Model(model)) {
+    return true
+  }
+
   const modelId = getLowerBaseModelName(model.id)
   const providerId = model?.provider?.toLowerCase()
   if (modelId.includes('grok-3-mini')) {
@@ -379,6 +394,22 @@ export function isGrok4FastReasoningModel(model?: Model): boolean {
   return modelId.includes('grok-4-fast') && !modelId.includes('non-reasoning')
 }
 
+/**
+ * Checks if the model is Grok 4.3
+ * Explicitly excludes non-reasoning variants (models with 'non-reasoning' in their ID)
+ *
+ * grok-4.3 is the first xAI model to natively support reasoning_effort with 4 levels:
+ * none, low, medium, high
+ */
+export function isGrok43Model(model?: Model): boolean {
+  if (!model) {
+    return false
+  }
+
+  const modelId = getLowerBaseModelName(model.id)
+  return modelId.includes('grok-4.3') && !modelId.includes('non-reasoning')
+}
+
 export function isGrokReasoningModel(model?: Model): boolean {
   if (!model) {
     return false
@@ -415,8 +446,21 @@ export function isGeminiReasoningModel(model?: Model): boolean {
 export const GEMINI_THINKING_MODEL_REGEX =
   /gemini-(?:2\.5.*(?:-latest)?|3(?:\.\d+)?-(?:flash|pro)(?:-preview)?|flash-latest|pro-latest|flash-lite-latest)(?:-[\w-]+)*$/i
 
+export const isHostedGemma4ThinkingModel = (model?: Model): boolean => {
+  if (!model) {
+    return false
+  }
+
+  const modelId = getLowerBaseModelName(model.id, '/')
+  return model.provider?.toLowerCase() === 'gemini' && modelId.startsWith('gemma-4-')
+}
+
 export const isSupportedThinkingTokenGeminiModel = (model: Model): boolean => {
   const modelId = getLowerBaseModelName(model.id, '/')
+  if (isHostedGemma4ThinkingModel(model)) {
+    return true
+  }
+
   if (GEMINI_THINKING_MODEL_REGEX.test(modelId)) {
     // ref: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/3-pro-image
     if (modelId.includes('gemini-3-pro-image')) {
@@ -656,7 +700,8 @@ export const isSupportedThinkingTokenKimiModel = (model: Model): boolean => {
  */
 export const isDeepSeekV4PlusModel = (model: Model) => {
   const { idResult, nameResult } = withModelIdAndNameAsId(model, (model) => {
-    const modelId = getLowerBaseModelName(model.id)
+    // Ignore routed provider suffix chains like :deepseek or :deepseek:together.
+    const modelId = getLowerBaseModelName(model.id).split(':', 1)[0]
     // Match deepseek-v{N} where N >= 4, with any optional suffix
     return /(\w+-)?deepseek-v([4-9]|\d{2,})([.-]\w+)*$/.test(modelId)
   })

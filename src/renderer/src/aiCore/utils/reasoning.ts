@@ -2,7 +2,7 @@ import type { BedrockProviderOptions } from '@ai-sdk/amazon-bedrock'
 import type { AnthropicProviderOptions } from '@ai-sdk/anthropic'
 import type { GoogleGenerativeAIProviderOptions } from '@ai-sdk/google'
 import type { OpenAIResponsesProviderOptions } from '@ai-sdk/openai'
-import type { XaiProviderOptions } from '@ai-sdk/xai'
+import type { XaiResponsesProviderOptions } from '@ai-sdk/xai'
 import type OpenAI from '@cherrystudio/openai'
 import { loggerService } from '@logger'
 import { DEFAULT_MAX_TOKENS } from '@renderer/config/constant'
@@ -19,6 +19,7 @@ import {
   isDoubaoThinkingAutoModel,
   isGemini3ThinkingTokenModel,
   isGrok4FastReasoningModel,
+  isHostedGemma4ThinkingModel,
   isOpenAIDeepResearchModel,
   isOpenAIModel,
   isOpenAIOpenWeightModel,
@@ -860,6 +861,21 @@ export function getGeminiReasoningParams(
   let thinkingLevel: GoogleThinkingLevel | null = null
   const includeThoughts = reasoningEffort !== 'none'
 
+  if (isHostedGemma4ThinkingModel(model)) {
+    // Hosted Gemma 4 does not expose a distinct hard-off mode on the Gemini API.
+    // We only surface minimal/high in the UI and collapse legacy or unexpected
+    // `none` inputs to `minimal` for compatibility.
+    const isHighThinking = reasoningEffort === 'high' || reasoningEffort === 'xhigh'
+    thinkingLevel = isHighThinking ? 'high' : 'minimal'
+
+    return {
+      thinkingConfig: {
+        includeThoughts: isHighThinking,
+        thinkingLevel
+      }
+    }
+  }
+
   // https://ai.google.dev/gemini-api/docs/gemini-3?thinking=high#new_api_features_in_gemini_3
   if (isGemini3ThinkingTokenModel(model)) {
     thinkingLevel = mapToGeminiThinkingLevel(reasoningEffort)
@@ -917,13 +933,33 @@ export function getGeminiReasoningParams(
  * @param model - The model being used
  * @returns XAI-specific reasoning parameters
  */
-export function getXAIReasoningParams(assistant: Assistant, model: Model): Pick<XaiProviderOptions, 'reasoningEffort'> {
-  if (!isSupportedReasoningEffortGrokModel(model)) {
+export function getXAIReasoningParams(
+  assistant: Assistant,
+  model: Model
+): Pick<XaiResponsesProviderOptions, 'reasoningEffort'> {
+  const isGrok43 =
+    getLowerBaseModelName(model.id).includes('grok-4.3') && !getLowerBaseModelName(model.id).includes('non-reasoning')
+
+  if (!isSupportedReasoningEffortGrokModel(model) && !isGrok43) {
     return {}
   }
 
   const { reasoning_effort: reasoningEffort } = getAssistantSettings(assistant)
+  if (!reasoningEffort || reasoningEffort === 'default') return {}
 
+  if (isGrok43) {
+    switch (reasoningEffort) {
+      case 'none':
+      case 'low':
+      case 'medium':
+      case 'high':
+        return { reasoningEffort }
+      default:
+        return {}
+    }
+  }
+
+  // Legacy grok models (grok-3-mini, openrouter/grok-4-fast): constrained effort mapping
   switch (reasoningEffort) {
     case 'auto':
     case 'minimal':
@@ -934,8 +970,6 @@ export function getXAIReasoningParams(assistant: Assistant, model: Model): Pick<
       return { reasoningEffort }
     case 'xhigh':
       return { reasoningEffort: 'high' }
-    case 'default':
-    case 'none':
     default:
       return {}
   }
