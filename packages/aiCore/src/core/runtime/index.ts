@@ -7,7 +7,7 @@
 export { RuntimeExecutor } from './executor'
 
 // 导出类型
-export type { EmbedManyParams, EmbedManyResult, RuntimeConfig } from './types'
+export type { EmbedManyParams, EmbedManyResult, RerankParams, RerankResult, RuntimeConfig } from './types'
 
 // === 便捷工厂函数 ===
 
@@ -102,6 +102,19 @@ export async function embedMany<
   return executor.embedMany(params)
 }
 
+export async function rerank<
+  TSettingsMap extends Record<string, any> = CoreProviderSettingsMap,
+  T extends StringKeys<TSettingsMap> = StringKeys<TSettingsMap>
+>(
+  providerId: T,
+  options: TSettingsMap[T],
+  params: Parameters<RuntimeExecutor<TSettingsMap, T>['rerank']>[0],
+  plugins?: AiPlugin[]
+): Promise<ReturnType<RuntimeExecutor<TSettingsMap, T>['rerank']>> {
+  const executor = await createExecutor<TSettingsMap, T>(providerId, options, plugins)
+  return executor.rerank(params)
+}
+
 /**
  * 创建 OpenAI Compatible 执行器
  */
@@ -114,9 +127,5 @@ export async function createOpenAICompatibleExecutor(
   return RuntimeExecutor.createOpenAICompatible(provider, options, plugins)
 }
 
-// === Agent 功能预留 ===
-// 未来将在 ../agents/ 文件夹中添加：
-// - AgentExecutor.ts
-// - WorkflowManager.ts
-// - ConversationManager.ts
-// 并在此处导出相关API
+// === Agent ===
+export { createAgent, type CreateAgentOptions } from '../agents'

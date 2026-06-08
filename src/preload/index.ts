@@ -1,57 +1,90 @@
-import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk'
 import type { TokenUsageData } from '@cherrystudio/analytics-client'
 import { electronAPI } from '@electron-toolkit/preload'
-import type { SpanEntity, TokenUsage } from '@mcp-trace/trace-core'
+import type { SpanEntity } from '@mcp-trace/trace-core'
 import type { SpanContext } from '@opentelemetry/api'
-import type { GitBashPathInfo, TerminalConfig, UpgradeChannel } from '@shared/config/constant'
+import type {
+  AiAgentSessionWarmCloseRequest,
+  AiAgentSessionWarmRequest,
+  AiStreamAbortRequest,
+  AiStreamAttachRequest,
+  AiStreamAttachResponse,
+  AiStreamDetachRequest,
+  AiStreamOpenRequest,
+  AiStreamOpenResponse,
+  StreamChunkPayload,
+  StreamDonePayload,
+  StreamErrorPayload
+} from '@shared/ai/transport'
+import type { CommandId, MenuAnchor, NativePopupMenuModel, NativePopupMenuResult } from '@shared/command'
+import type { GitBashPathInfo, TerminalConfig } from '@shared/config/constant'
 import type { LogLevel, LogSourceWithContext } from '@shared/config/logger'
 import type {
   CodeToolsRunResult,
-  FileChangeEvent,
   LanClientEvent,
   LanFileCompleteMessage,
   LanHandshakeAckMessage,
-  LocalTransferConnectPayload,
-  LocalTransferState,
+  LanTransferConnectPayload,
+  LanTransferState,
+  McpServerLogEntry,
   OperationResult,
   WebviewKeyEvent
 } from '@shared/config/types'
-import type { MCPServerLogEntry } from '@shared/config/types'
-import type { ExternalAppInfo } from '@shared/externalApp/types'
-import { IpcChannel } from '@shared/IpcChannel'
-import type { Notification } from '@types'
+import type { JobSnapshot } from '@shared/data/api/schemas/jobs'
+import type { CacheEntry, CacheSyncMessage } from '@shared/data/cache/cacheTypes'
 import type {
-  AddMemoryOptions,
-  AssistantMessage,
-  FileListResponse,
+  FileProcessorFeature,
+  FileProcessorId,
+  SelectionActionItem,
+  UnifiedPreferenceKeyType,
+  UnifiedPreferenceMultipleResultType,
+  UnifiedPreferenceType,
+  UpgradeChannel
+} from '@shared/data/preference/preferenceTypes'
+import type { FileEntry, FileEntryId } from '@shared/data/types/file'
+import type { ListAvailableFileProcessorsResult } from '@shared/data/types/fileProcessing'
+import type {
+  CreateKnowledgeBaseDto,
+  KnowledgeBase,
+  KnowledgeItemChunk,
+  KnowledgeRuntimeAddItemInput,
+  KnowledgeSearchResult as KnowledgeVectorSearchResult,
+  RestoreKnowledgeBaseDto
+} from '@shared/data/types/knowledge'
+import type { Model } from '@shared/data/types/model'
+import type { SettingsPath } from '@shared/data/types/settingsPath'
+import type {
+  WebSearchCheckProviderRequest,
+  WebSearchCheckProviderResponse,
+  WebSearchFetchUrlsRequest,
+  WebSearchResponse,
+  WebSearchSearchKeywordsRequest
+} from '@shared/data/types/webSearch'
+import type { ExternalAppInfo } from '@shared/externalApp/types'
+import type { FilePath, PhysicalFileMetadata } from '@shared/file/types/common'
+import type { FileHandle } from '@shared/file/types/handle'
+import type {
+  CreateInternalEntryIpcParams,
+  EnsureExternalEntryIpcParams,
+  GetPhysicalPathIpcParams
+} from '@shared/file/types/ipc'
+import type { CreateTreeIpcResult, DirectoryTreeOptions, TreeMutationPushPayload } from '@shared/file/types/tree'
+import { IpcChannel } from '@shared/IpcChannel'
+import type { ShortcutPreferenceKey } from '@shared/shortcuts/types'
+import type { StorageHealth } from '@shared/types/storageMonitor'
+import type {
+  ApiGatewayStatusResult,
   FileMetadata,
-  FileUploadResponse,
-  GetApiServerStatusResult,
-  KnowledgeBaseParams,
-  KnowledgeItem,
-  KnowledgeSearchResult,
-  MCPServer,
-  MemoryConfig,
-  MemoryListOptions,
-  MemorySearchOptions,
-  Model,
+  Notification,
   OcrProvider,
   OcrResult,
-  Provider,
-  RestartApiServerStatusResult,
   S3Config,
-  Shortcut,
-  StartApiServerStatusResult,
-  StopApiServerStatusResult,
   SupportedOcrFile,
-  ThemeMode,
   WebDavConfig
 } from '@types'
 import type { OpenDialogOptions } from 'electron'
 import { contextBridge, ipcRenderer, shell, webUtils } from 'electron'
 import type { CreateDirectoryOptions } from 'webdav'
 
-import type { ActionItem } from '../renderer/src/types/selectionTypes'
 import type {
   InstalledSkill,
   LocalSkill,
@@ -61,8 +94,7 @@ import type {
   SkillInstallOptions,
   SkillResult,
   SkillToggleOptions
-} from '../renderer/src/types/skill'
-
+} from '../renderer/types/skill'
 // OpenClaw types
 type OpenClawGatewayStatus = 'stopped' | 'starting' | 'running' | 'error'
 
@@ -88,6 +120,12 @@ type DirectoryListOptions = {
   searchPattern?: string
 }
 
+type ShortcutRegistrationConflictPayload = {
+  key: ShortcutPreferenceKey
+  accelerator?: string
+  hasConflict: boolean
+}
+
 export function tracedInvoke(channel: string, spanContext: SpanContext | undefined, ...args: any[]) {
   if (spanContext) {
     const data = { type: 'trace', context: spanContext }
@@ -99,24 +137,15 @@ export function tracedInvoke(channel: string, spanContext: SpanContext | undefin
 // Custom APIs for renderer
 const api = {
   getAppInfo: () => ipcRenderer.invoke(IpcChannel.App_Info),
-  getDiskInfo: (directoryPath: string): Promise<{ free: number; size: number } | null> =>
-    ipcRenderer.invoke(IpcChannel.App_GetDiskInfo, directoryPath),
-  reload: () => ipcRenderer.invoke(IpcChannel.App_Reload),
-  quit: () => ipcRenderer.invoke(IpcChannel.App_Quit),
-  setProxy: (proxy: string | undefined, bypassRules?: string) =>
-    ipcRenderer.invoke(IpcChannel.App_Proxy, proxy, bypassRules),
+  reload: () => ipcRenderer.invoke(IpcChannel.MainWindow_Reload),
   checkForUpdate: () => ipcRenderer.invoke(IpcChannel.App_CheckForUpdate),
-  quitAndInstall: () => ipcRenderer.invoke(IpcChannel.App_QuitAndInstall),
-  setLanguage: (lang: string) => ipcRenderer.invoke(IpcChannel.App_SetLanguage, lang),
+  // setLanguage: (lang: string) => ipcRenderer.invoke(IpcChannel.App_SetLanguage, lang),
   setEnableSpellCheck: (isEnable: boolean) => ipcRenderer.invoke(IpcChannel.App_SetEnableSpellCheck, isEnable),
   setSpellCheckLanguages: (languages: string[]) => ipcRenderer.invoke(IpcChannel.App_SetSpellCheckLanguages, languages),
   setLaunchOnBoot: (isActive: boolean) => ipcRenderer.invoke(IpcChannel.App_SetLaunchOnBoot, isActive),
-  setLaunchToTray: (isActive: boolean) => ipcRenderer.invoke(IpcChannel.App_SetLaunchToTray, isActive),
-  setTray: (isActive: boolean) => ipcRenderer.invoke(IpcChannel.App_SetTray, isActive),
-  setTrayOnClose: (isActive: boolean) => ipcRenderer.invoke(IpcChannel.App_SetTrayOnClose, isActive),
   setTestPlan: (isActive: boolean) => ipcRenderer.invoke(IpcChannel.App_SetTestPlan, isActive),
   setTestChannel: (channel: UpgradeChannel) => ipcRenderer.invoke(IpcChannel.App_SetTestChannel, channel),
-  setTheme: (theme: ThemeMode) => ipcRenderer.invoke(IpcChannel.App_SetTheme, theme),
+  // setTheme: (theme: ThemeMode) => ipcRenderer.invoke(IpcChannel.App_SetTheme, theme),
   handleZoomFactor: (delta: number, reset: boolean = false) =>
     ipcRenderer.invoke(IpcChannel.App_HandleZoomFactor, delta, reset),
   setAutoUpdate: (isActive: boolean) => ipcRenderer.invoke(IpcChannel.App_SetAutoUpdate, isActive),
@@ -129,21 +158,25 @@ const api = {
   getDataPathFromArgs: () => ipcRenderer.invoke(IpcChannel.App_GetDataPathFromArgs),
   copy: (oldPath: string, newPath: string, occupiedDirs: string[] = []) =>
     ipcRenderer.invoke(IpcChannel.App_Copy, oldPath, newPath, occupiedDirs),
-  setStopQuitApp: (stop: boolean, reason: string) => ipcRenderer.invoke(IpcChannel.App_SetStopQuitApp, stop, reason),
+  quitAndInstall: () => ipcRenderer.invoke(IpcChannel.App_QuitAndInstall),
+  application: {
+    quit: (): Promise<void> => ipcRenderer.invoke(IpcChannel.Application_Quit),
+    preventQuit: (reason: string): Promise<string> => ipcRenderer.invoke(IpcChannel.Application_PreventQuit, reason),
+    allowQuit: (holdId: string): Promise<void> => ipcRenderer.invoke(IpcChannel.Application_AllowQuit, holdId),
+    relaunch: (options?: Electron.RelaunchOptions): Promise<void> =>
+      ipcRenderer.invoke(IpcChannel.Application_Relaunch, options)
+  },
   flushAppData: () => ipcRenderer.invoke(IpcChannel.App_FlushAppData),
   isNotEmptyDir: (path: string) => ipcRenderer.invoke(IpcChannel.App_IsNotEmptyDir, path),
-  relaunchApp: (options?: Electron.RelaunchOptions) => ipcRenderer.invoke(IpcChannel.App_RelaunchApp, options),
   resetData: () => ipcRenderer.invoke(IpcChannel.App_ResetData),
   openWebsite: (url: string) => ipcRenderer.invoke(IpcChannel.Open_Website, url),
   getCacheSize: () => ipcRenderer.invoke(IpcChannel.App_GetCacheSize),
   clearCache: () => ipcRenderer.invoke(IpcChannel.App_ClearCache),
   logToMain: (source: LogSourceWithContext, level: LogLevel, message: string, data: any[]) =>
     ipcRenderer.invoke(IpcChannel.App_LogToMain, source, level, message, data),
-  setFullScreen: (value: boolean): Promise<void> => ipcRenderer.invoke(IpcChannel.App_SetFullScreen, value),
-  isFullScreen: (): Promise<boolean> => ipcRenderer.invoke(IpcChannel.App_IsFullScreen),
   getSystemFonts: (): Promise<string[]> => ipcRenderer.invoke(IpcChannel.App_GetSystemFonts),
   getIpCountry: (): Promise<string> => ipcRenderer.invoke(IpcChannel.App_GetIpCountry),
-  mockCrashRenderProcess: () => ipcRenderer.invoke(IpcChannel.APP_CrashRenderProcess),
+  mockCrashRenderProcess: () => ipcRenderer.invoke(IpcChannel.MainWindow_CrashRenderProcess),
   mac: {
     isProcessTrusted: (): Promise<boolean> => ipcRenderer.invoke(IpcChannel.App_MacIsProcessTrusted),
     requestProcessTrust: (): Promise<boolean> => ipcRenderer.invoke(IpcChannel.App_MacRequestProcessTrust)
@@ -209,6 +242,14 @@ const api = {
     select: (options?: OpenDialogOptions): Promise<FileMetadata[] | null> =>
       ipcRenderer.invoke(IpcChannel.File_Select, options),
     upload: (file: FileMetadata) => ipcRenderer.invoke(IpcChannel.File_Upload, file),
+    createInternalEntry: (params: CreateInternalEntryIpcParams): Promise<FileEntry> =>
+      ipcRenderer.invoke(IpcChannel.File_CreateInternalEntry, params),
+    ensureExternalEntry: (params: EnsureExternalEntryIpcParams): Promise<FileEntry> =>
+      ipcRenderer.invoke(IpcChannel.File_EnsureExternalEntry, params),
+    getPhysicalPath: (params: GetPhysicalPathIpcParams): Promise<FilePath> =>
+      ipcRenderer.invoke(IpcChannel.File_GetPhysicalPath, params),
+    permanentDelete: (handle: FileHandle): Promise<void> => ipcRenderer.invoke(IpcChannel.File_PermanentDelete, handle),
+    runSweep: () => ipcRenderer.invoke(IpcChannel.File_RunSweep),
     delete: (fileId: string) => ipcRenderer.invoke(IpcChannel.File_Delete, fileId),
     deleteDir: (dirPath: string) => ipcRenderer.invoke(IpcChannel.File_DeleteDir, dirPath),
     deleteExternalFile: (filePath: string) => ipcRenderer.invoke(IpcChannel.File_DeleteExternalFile, filePath),
@@ -250,33 +291,39 @@ const api = {
     openFileWithRelativePath: (file: FileMetadata) => ipcRenderer.invoke(IpcChannel.File_OpenWithRelativePath, file),
     isTextFile: (filePath: string): Promise<boolean> => ipcRenderer.invoke(IpcChannel.File_IsTextFile, filePath),
     isDirectory: (filePath: string): Promise<boolean> => ipcRenderer.invoke(IpcChannel.File_IsDirectory, filePath),
-    getDirectoryStructure: (dirPath: string) => ipcRenderer.invoke(IpcChannel.File_GetDirectoryStructure, dirPath),
+    getMetadata: (handle: FileHandle): Promise<PhysicalFileMetadata> =>
+      ipcRenderer.invoke(IpcChannel.File_GetMetadata, handle),
     listDirectory: (dirPath: string, options?: DirectoryListOptions) =>
       ipcRenderer.invoke(IpcChannel.File_ListDirectory, dirPath, options),
     checkFileName: (dirPath: string, fileName: string, isFile: boolean) =>
       ipcRenderer.invoke(IpcChannel.File_CheckFileName, dirPath, fileName, isFile),
     validateNotesDirectory: (dirPath: string) => ipcRenderer.invoke(IpcChannel.File_ValidateNotesDirectory, dirPath),
-    startFileWatcher: (dirPath: string, config?: any) =>
-      ipcRenderer.invoke(IpcChannel.File_StartWatcher, dirPath, config),
-    stopFileWatcher: () => ipcRenderer.invoke(IpcChannel.File_StopWatcher),
-    pauseFileWatcher: () => ipcRenderer.invoke(IpcChannel.File_PauseWatcher),
-    resumeFileWatcher: () => ipcRenderer.invoke(IpcChannel.File_ResumeWatcher),
+    // Legacy file-watcher bindings (`startFileWatcher` / `stopFileWatcher`
+    // / `pauseFileWatcher` / `resumeFileWatcher` / `onFileChange`) and
+    // `getDirectoryStructure` were removed alongside the Notes migration
+    // to `DirectoryTreeBuilder` (see docs/references/file/directory-tree.md).
+    // mutations via `window.api.tree.onMutation` instead.
     batchUploadMarkdown: (filePaths: string[], targetPath: string) =>
       ipcRenderer.invoke(IpcChannel.File_BatchUploadMarkdown, filePaths, targetPath),
-    onFileChange: (callback: (data: FileChangeEvent) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, data: any) => {
-        if (data && typeof data === 'object') {
-          callback(data)
-        }
-      }
-      ipcRenderer.on('file-change', listener)
-      return () => ipcRenderer.off('file-change', listener)
-    },
     showInFolder: (path: string): Promise<void> => ipcRenderer.invoke(IpcChannel.File_ShowInFolder, path)
   },
   fs: {
     read: (pathOrUrl: string, encoding?: BufferEncoding) => ipcRenderer.invoke(IpcChannel.Fs_Read, pathOrUrl, encoding),
     readText: (pathOrUrl: string): Promise<string> => ipcRenderer.invoke(IpcChannel.Fs_ReadText, pathOrUrl)
+  },
+  tree: {
+    create: (rootPath: string, options?: DirectoryTreeOptions): Promise<CreateTreeIpcResult> =>
+      ipcRenderer.invoke(IpcChannel.File_TreeCreate, { rootPath, options }),
+    dispose: (treeId: string): Promise<void> => ipcRenderer.invoke(IpcChannel.File_TreeDispose, { treeId }),
+    rename: (treeId: string, oldPath: string, newPath: string): Promise<boolean> =>
+      ipcRenderer.invoke(IpcChannel.File_TreeRename, { treeId, oldPath, newPath }),
+    onMutation: (callback: (payload: TreeMutationPushPayload) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: TreeMutationPushPayload) => {
+        if (payload && typeof payload === 'object') callback(payload)
+      }
+      ipcRenderer.on(IpcChannel.File_TreeMutation, listener)
+      return () => ipcRenderer.off(IpcChannel.File_TreeMutation, listener)
+    }
   },
   pdf: {
     extractText: (data: Uint8Array | ArrayBuffer | string): Promise<string> =>
@@ -291,64 +338,43 @@ const api = {
     getFiles: (vaultName: string) => ipcRenderer.invoke(IpcChannel.Obsidian_GetFiles, vaultName)
   },
   openPath: (path: string) => ipcRenderer.invoke(IpcChannel.Open_Path, path),
-  shortcuts: {
-    update: (shortcuts: Shortcut[]) => ipcRenderer.invoke(IpcChannel.Shortcuts_Update, shortcuts)
-  },
   knowledgeBase: {
-    create: (base: KnowledgeBaseParams, context?: SpanContext) =>
-      tracedInvoke(IpcChannel.KnowledgeBase_Create, context, base),
-    reset: (base: KnowledgeBaseParams) => ipcRenderer.invoke(IpcChannel.KnowledgeBase_Reset, base),
-    delete: (id: string) => ipcRenderer.invoke(IpcChannel.KnowledgeBase_Delete, id),
-    add: ({
-      base,
-      item,
-      userId,
-      forceReload = false
-    }: {
-      base: KnowledgeBaseParams
-      item: KnowledgeItem
-      userId?: string
-      forceReload?: boolean
-    }) => ipcRenderer.invoke(IpcChannel.KnowledgeBase_Add, { base, item, forceReload, userId }),
-    remove: ({ uniqueId, uniqueIds, base }: { uniqueId: string; uniqueIds: string[]; base: KnowledgeBaseParams }) =>
-      ipcRenderer.invoke(IpcChannel.KnowledgeBase_Remove, { uniqueId, uniqueIds, base }),
-    search: ({ search, base }: { search: string; base: KnowledgeBaseParams }, context?: SpanContext) =>
-      tracedInvoke(IpcChannel.KnowledgeBase_Search, context, { search, base }),
-    rerank: (
-      { search, base, results }: { search: string; base: KnowledgeBaseParams; results: KnowledgeSearchResult[] },
-      context?: SpanContext
-    ) => tracedInvoke(IpcChannel.KnowledgeBase_Rerank, context, { search, base, results })
+    // v1 renderer knowledge path retired (T4.2). Only base deletion remains,
+    // still invoked by the v1 Redux store/knowledge slice until that slice is
+    // removed in the unified step. v2 knowledge runs via window.api.knowledgeRuntime.*.
+    delete: (id: string) => ipcRenderer.invoke(IpcChannel.KnowledgeBase_Delete, id)
   },
-  memory: {
-    add: (messages: string | AssistantMessage[], options?: AddMemoryOptions) =>
-      ipcRenderer.invoke(IpcChannel.Memory_Add, messages, options),
-    search: (query: string, options: MemorySearchOptions) =>
-      ipcRenderer.invoke(IpcChannel.Memory_Search, query, options),
-    list: (options?: MemoryListOptions) => ipcRenderer.invoke(IpcChannel.Memory_List, options),
-    delete: (id: string) => ipcRenderer.invoke(IpcChannel.Memory_Delete, id),
-    update: (id: string, memory: string, metadata?: Record<string, any>) =>
-      ipcRenderer.invoke(IpcChannel.Memory_Update, id, memory, metadata),
-    get: (id: string) => ipcRenderer.invoke(IpcChannel.Memory_Get, id),
-    setConfig: (config: MemoryConfig) => ipcRenderer.invoke(IpcChannel.Memory_SetConfig, config),
-    deleteUser: (userId: string) => ipcRenderer.invoke(IpcChannel.Memory_DeleteUser, userId),
-    deleteAllMemoriesForUser: (userId: string) =>
-      ipcRenderer.invoke(IpcChannel.Memory_DeleteAllMemoriesForUser, userId),
-    getUsersList: () => ipcRenderer.invoke(IpcChannel.Memory_GetUsersList),
-    migrateMemoryDb: () => ipcRenderer.invoke(IpcChannel.Memory_MigrateMemoryDb)
+  knowledgeRuntime: {
+    createBase: (base: CreateKnowledgeBaseDto): Promise<KnowledgeBase> =>
+      ipcRenderer.invoke(IpcChannel.KnowledgeRuntime_CreateBase, { base }),
+    restoreBase: (dto: RestoreKnowledgeBaseDto): Promise<KnowledgeBase> =>
+      ipcRenderer.invoke(IpcChannel.KnowledgeRuntime_RestoreBase, dto),
+    deleteBase: (baseId: string): Promise<void> =>
+      ipcRenderer.invoke(IpcChannel.KnowledgeRuntime_DeleteBase, { baseId }),
+    addItems: (baseId: string, items: KnowledgeRuntimeAddItemInput[]): Promise<void> =>
+      ipcRenderer.invoke(IpcChannel.KnowledgeRuntime_AddItems, { baseId, items }),
+    deleteItems: (baseId: string, itemIds: string[]): Promise<void> =>
+      ipcRenderer.invoke(IpcChannel.KnowledgeRuntime_DeleteItems, { baseId, itemIds }),
+    reindexItems: (baseId: string, itemIds: string[]): Promise<void> =>
+      ipcRenderer.invoke(IpcChannel.KnowledgeRuntime_ReindexItems, { baseId, itemIds }),
+    search: (baseId: string, query: string): Promise<KnowledgeVectorSearchResult[]> =>
+      ipcRenderer.invoke(IpcChannel.KnowledgeRuntime_Search, { baseId, query }),
+    listItemChunks: (baseId: string, itemId: string): Promise<KnowledgeItemChunk[]> =>
+      ipcRenderer.invoke(IpcChannel.KnowledgeRuntime_ListItemChunks, { baseId, itemId }),
+    deleteItemChunk: (baseId: string, itemId: string, chunkId: string): Promise<void> =>
+      ipcRenderer.invoke(IpcChannel.KnowledgeRuntime_DeleteItemChunk, { baseId, itemId, chunkId })
   },
   window: {
     setMinimumSize: (width: number, height: number) =>
-      ipcRenderer.invoke(IpcChannel.Windows_SetMinimumSize, width, height),
-    resetMinimumSize: () => ipcRenderer.invoke(IpcChannel.Windows_ResetMinimumSize),
-    getSize: (): Promise<[number, number]> => ipcRenderer.invoke(IpcChannel.Windows_GetSize)
+      ipcRenderer.invoke(IpcChannel.MainWindow_SetMinimumSize, width, height),
+    resetMinimumSize: () => ipcRenderer.invoke(IpcChannel.MainWindow_ResetMinimumSize)
   },
-  fileService: {
-    upload: (provider: Provider, file: FileMetadata): Promise<FileUploadResponse> =>
-      ipcRenderer.invoke(IpcChannel.FileService_Upload, provider, file),
-    list: (provider: Provider): Promise<FileListResponse> => ipcRenderer.invoke(IpcChannel.FileService_List, provider),
-    delete: (provider: Provider, fileId: string) => ipcRenderer.invoke(IpcChannel.FileService_Delete, provider, fileId),
-    retrieve: (provider: Provider, fileId: string): Promise<FileUploadResponse> =>
-      ipcRenderer.invoke(IpcChannel.FileService_Retrieve, provider, fileId)
+  command: {
+    showNativePopupMenu: (
+      model: NativePopupMenuModel<CommandId>,
+      anchor?: MenuAnchor
+    ): Promise<NativePopupMenuResult<CommandId> | undefined> =>
+      ipcRenderer.invoke(IpcChannel.NativeCommandPopupMenu_Show, model, anchor)
   },
   selectionMenu: {
     action: (action: string) => ipcRenderer.invoke('selection-menu:action', action)
@@ -378,12 +404,12 @@ const api = {
       ipcRenderer.invoke(IpcChannel.Config_Set, key, value, isNotify),
     get: (key: string) => ipcRenderer.invoke(IpcChannel.Config_Get, key)
   },
-  miniWindow: {
-    show: () => ipcRenderer.invoke(IpcChannel.MiniWindow_Show),
-    hide: () => ipcRenderer.invoke(IpcChannel.MiniWindow_Hide),
-    close: () => ipcRenderer.invoke(IpcChannel.MiniWindow_Close),
-    toggle: () => ipcRenderer.invoke(IpcChannel.MiniWindow_Toggle),
-    setPin: (isPinned: boolean) => ipcRenderer.invoke(IpcChannel.MiniWindow_SetPin, isPinned)
+  quickAssistant: {
+    show: () => ipcRenderer.invoke(IpcChannel.QuickAssistant_Show),
+    hide: () => ipcRenderer.invoke(IpcChannel.QuickAssistant_Hide),
+    close: () => ipcRenderer.invoke(IpcChannel.QuickAssistant_Close),
+    toggle: () => ipcRenderer.invoke(IpcChannel.QuickAssistant_Toggle),
+    setPin: (isPinned: boolean) => ipcRenderer.invoke(IpcChannel.QuickAssistant_SetPin, isPinned)
   },
   aes: {
     encrypt: (text: string, secretKey: string, iv: string) =>
@@ -392,35 +418,40 @@ const api = {
       ipcRenderer.invoke(IpcChannel.Aes_Decrypt, encryptedData, iv, secretKey)
   },
   mcp: {
-    removeServer: (server: MCPServer) => ipcRenderer.invoke(IpcChannel.Mcp_RemoveServer, server),
-    restartServer: (server: MCPServer) => ipcRenderer.invoke(IpcChannel.Mcp_RestartServer, server),
-    stopServer: (server: MCPServer) => ipcRenderer.invoke(IpcChannel.Mcp_StopServer, server),
-    listTools: (server: MCPServer, context?: SpanContext) => tracedInvoke(IpcChannel.Mcp_ListTools, context, server),
+    removeServer: (serverId: string) => ipcRenderer.invoke(IpcChannel.Mcp_RemoveServer, serverId),
+    restartServer: (serverId: string) => ipcRenderer.invoke(IpcChannel.Mcp_RestartServer, serverId),
+    stopServer: (serverId: string) => ipcRenderer.invoke(IpcChannel.Mcp_StopServer, serverId),
+    refreshTools: (serverId: string, context?: SpanContext) =>
+      tracedInvoke(IpcChannel.Mcp_RefreshTools, context, serverId),
     callTool: (
-      { server, name, args, callId }: { server: MCPServer; name: string; args: any; callId?: string },
+      { serverId, name, args, callId }: { serverId: string; name: string; args: any; callId?: string },
       context?: SpanContext
-    ) => tracedInvoke(IpcChannel.Mcp_CallTool, context, { server, name, args, callId }),
-    listPrompts: (server: MCPServer) => ipcRenderer.invoke(IpcChannel.Mcp_ListPrompts, server),
-    getPrompt: ({ server, name, args }: { server: MCPServer; name: string; args?: Record<string, any> }) =>
-      ipcRenderer.invoke(IpcChannel.Mcp_GetPrompt, { server, name, args }),
-    listResources: (server: MCPServer) => ipcRenderer.invoke(IpcChannel.Mcp_ListResources, server),
-    getResource: ({ server, uri }: { server: MCPServer; uri: string }) =>
-      ipcRenderer.invoke(IpcChannel.Mcp_GetResource, { server, uri }),
+    ) =>
+      tracedInvoke(IpcChannel.Mcp_CallTool, context, {
+        serverId,
+        name,
+        args,
+        callId
+      }),
+    listPrompts: (serverId: string) => ipcRenderer.invoke(IpcChannel.Mcp_ListPrompts, serverId),
+    getPrompt: ({ serverId, name, args }: { serverId: string; name: string; args?: Record<string, any> }) =>
+      ipcRenderer.invoke(IpcChannel.Mcp_GetPrompt, { serverId, name, args }),
+    listResources: (serverId: string) => ipcRenderer.invoke(IpcChannel.Mcp_ListResources, serverId),
+    getResource: ({ serverId, uri }: { serverId: string; uri: string }) =>
+      ipcRenderer.invoke(IpcChannel.Mcp_GetResource, { serverId, uri }),
     getInstallInfo: () => ipcRenderer.invoke(IpcChannel.Mcp_GetInstallInfo),
-    checkMcpConnectivity: (server: any) => ipcRenderer.invoke(IpcChannel.Mcp_CheckConnectivity, server),
+    checkMcpConnectivity: (serverId: string) => ipcRenderer.invoke(IpcChannel.Mcp_CheckConnectivity, serverId),
     uploadDxt: async (file: File) => {
       const buffer = await file.arrayBuffer()
       return ipcRenderer.invoke(IpcChannel.Mcp_UploadDxt, buffer, file.name)
     },
     abortTool: (callId: string) => ipcRenderer.invoke(IpcChannel.Mcp_AbortTool, callId),
-    resolveHubTool: (nameOrId: string): Promise<{ serverId: string; toolName: string } | null> =>
-      ipcRenderer.invoke(IpcChannel.Mcp_ResolveHubTool, nameOrId),
-    getServerVersion: (server: MCPServer): Promise<string | null> =>
-      ipcRenderer.invoke(IpcChannel.Mcp_GetServerVersion, server),
-    getServerLogs: (server: MCPServer): Promise<MCPServerLogEntry[]> =>
-      ipcRenderer.invoke(IpcChannel.Mcp_GetServerLogs, server),
-    onServerLog: (callback: (log: MCPServerLogEntry & { serverId?: string }) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, log: MCPServerLogEntry & { serverId?: string }) => {
+    getServerVersion: (serverId: string): Promise<string | null> =>
+      ipcRenderer.invoke(IpcChannel.Mcp_GetServerVersion, serverId),
+    getServerLogs: (serverId: string): Promise<McpServerLogEntry[]> =>
+      ipcRenderer.invoke(IpcChannel.Mcp_GetServerLogs, serverId),
+    onServerLog: (callback: (log: McpServerLogEntry & { serverId?: string }) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, log: McpServerLogEntry & { serverId?: string }) => {
         callback(log)
       }
       ipcRenderer.on(IpcChannel.Mcp_ServerLog, listener)
@@ -464,7 +495,18 @@ const api = {
     logout: (apiHost: string) => ipcRenderer.invoke(IpcChannel.CherryIN_Logout, apiHost),
     startOAuthFlow: (oauthServer: string, apiHost?: string) =>
       ipcRenderer.invoke(IpcChannel.CherryIN_StartOAuthFlow, oauthServer, apiHost),
-    exchangeToken: (code: string, state: string) => ipcRenderer.invoke(IpcChannel.CherryIN_ExchangeToken, code, state)
+    onOAuthResult: (
+      callback: (result: { state: string; apiKeys: string } | { state: string; error: string }) => void
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        result: { state: string; apiKeys: string } | { state: string; error: string }
+      ) => callback(result)
+      ipcRenderer.on(IpcChannel.CherryIN_OAuthResult, listener)
+      return () => {
+        ipcRenderer.off(IpcChannel.CherryIN_OAuthResult, listener)
+      }
+    }
   },
   // Binary related APIs
   isBinaryExist: (name: string) => ipcRenderer.invoke(IpcChannel.App_IsBinaryExist, name),
@@ -514,96 +556,46 @@ const api = {
       }
     }
   },
-  storeSync: {
-    subscribe: () => ipcRenderer.invoke(IpcChannel.StoreSync_Subscribe),
-    unsubscribe: () => ipcRenderer.invoke(IpcChannel.StoreSync_Unsubscribe),
-    onUpdate: (action: any) => ipcRenderer.invoke(IpcChannel.StoreSync_OnUpdate, action)
+  windowManager: {
+    openSettings: (path: SettingsPath = '/settings/provider'): Promise<string> =>
+      ipcRenderer.invoke(IpcChannel.SettingsWindow_Open, path),
+
+    // Retrieve init data that the main process stored for this window via
+    // wm.setInitData() or wm.open({ initData }). Returns null when no data was set or when
+    // the sender window is not managed by WindowManager (e.g., detached devtools).
+    // Renderers that also need to update on reuse should prefer the useWindowInitData
+    // hook (hooks/useWindowInitData), which also listens for WindowManager_Reused.
+    getInitData: <T = unknown>(): Promise<T | null> => ipcRenderer.invoke(IpcChannel.WindowManager_GetInitData),
+
+    minimize: (): Promise<void> => ipcRenderer.invoke(IpcChannel.WindowManager_Minimize),
+    maximize: (): Promise<void> => ipcRenderer.invoke(IpcChannel.WindowManager_Maximize),
+    unmaximize: (): Promise<void> => ipcRenderer.invoke(IpcChannel.WindowManager_Unmaximize),
+    close: (): Promise<void> => ipcRenderer.invoke(IpcChannel.WindowManager_Close),
+    isMaximized: (): Promise<boolean> => ipcRenderer.invoke(IpcChannel.WindowManager_IsMaximized),
+
+    setFullScreen: (value: boolean): Promise<void> => ipcRenderer.invoke(IpcChannel.WindowManager_SetFullScreen, value),
+    isFullScreen: (): Promise<boolean> => ipcRenderer.invoke(IpcChannel.WindowManager_IsFullScreen),
+
+    onMaximizedChange: (callback: (isMaximized: boolean) => void): (() => void) => {
+      const listener = (_: Electron.IpcRendererEvent, isMaximized: boolean) => callback(isMaximized)
+      ipcRenderer.on(IpcChannel.WindowManager_MaximizedChanged, listener)
+      return () => ipcRenderer.off(IpcChannel.WindowManager_MaximizedChanged, listener)
+    },
+    onFullscreenChange: (callback: (isFullscreen: boolean) => void): (() => void) => {
+      const listener = (_: Electron.IpcRendererEvent, isFullscreen: boolean) => callback(isFullscreen)
+      ipcRenderer.on(IpcChannel.WindowManager_FullscreenChanged, listener)
+      return () => ipcRenderer.off(IpcChannel.WindowManager_FullscreenChanged, listener)
+    }
   },
   selection: {
     hideToolbar: () => ipcRenderer.invoke(IpcChannel.Selection_ToolbarHide),
     writeToClipboard: (text: string) => ipcRenderer.invoke(IpcChannel.Selection_WriteToClipboard, text),
     determineToolbarSize: (width: number, height: number) =>
       ipcRenderer.invoke(IpcChannel.Selection_ToolbarDetermineSize, width, height),
-    setEnabled: (enabled: boolean) => ipcRenderer.invoke(IpcChannel.Selection_SetEnabled, enabled),
-    setTriggerMode: (triggerMode: string) => ipcRenderer.invoke(IpcChannel.Selection_SetTriggerMode, triggerMode),
-    setFollowToolbar: (isFollowToolbar: boolean) =>
-      ipcRenderer.invoke(IpcChannel.Selection_SetFollowToolbar, isFollowToolbar),
-    setRemeberWinSize: (isRemeberWinSize: boolean) =>
-      ipcRenderer.invoke(IpcChannel.Selection_SetRemeberWinSize, isRemeberWinSize),
-    setFilterMode: (filterMode: string) => ipcRenderer.invoke(IpcChannel.Selection_SetFilterMode, filterMode),
-    setFilterList: (filterList: string[]) => ipcRenderer.invoke(IpcChannel.Selection_SetFilterList, filterList),
-    processAction: (actionItem: ActionItem, isFullScreen: boolean = false) =>
+    processAction: (actionItem: SelectionActionItem, isFullScreen: boolean = false) =>
       ipcRenderer.invoke(IpcChannel.Selection_ProcessAction, actionItem, isFullScreen),
-    closeActionWindow: () => ipcRenderer.invoke(IpcChannel.Selection_ActionWindowClose),
-    minimizeActionWindow: () => ipcRenderer.invoke(IpcChannel.Selection_ActionWindowMinimize),
     pinActionWindow: (isPinned: boolean) => ipcRenderer.invoke(IpcChannel.Selection_ActionWindowPin, isPinned),
     getLinuxEnvInfo: () => ipcRenderer.invoke(IpcChannel.Selection_GetLinuxEnvInfo)
-  },
-  agentTools: {
-    respondToPermission: (payload: {
-      requestId: string
-      behavior: 'allow' | 'deny'
-      updatedInput?: Record<string, unknown>
-      message?: string
-      updatedPermissions?: PermissionUpdate[]
-    }) => ipcRenderer.invoke(IpcChannel.AgentToolPermission_Response, payload)
-  },
-  agentSessionStream: {
-    subscribe: (sessionId: string) => ipcRenderer.invoke(IpcChannel.AgentSessionStream_Subscribe, { sessionId }),
-    unsubscribe: (sessionId: string) => ipcRenderer.invoke(IpcChannel.AgentSessionStream_Unsubscribe, { sessionId }),
-    abort: (sessionId: string) => ipcRenderer.invoke(IpcChannel.AgentSessionStream_Abort, { sessionId }),
-    onChunk: (
-      callback: (chunk: {
-        sessionId: string
-        agentId: string
-        type: string
-        chunk?: any
-        error?: any
-        userMessage?: {
-          chatId: string
-          userId: string
-          userName: string
-          text: string
-          images?: Array<{ data: string; media_type: string }>
-          files?: Array<{ filename: string; media_type: string; size: number }>
-        }
-      }) => void
-    ): (() => void) => {
-      const listener = (
-        _event: Electron.IpcRendererEvent,
-        chunk: {
-          sessionId: string
-          agentId: string
-          type: string
-          chunk?: any
-          error?: any
-          userMessage?: {
-            chatId: string
-            userId: string
-            userName: string
-            text: string
-            images?: Array<{ data: string; media_type: string }>
-            files?: Array<{ filename: string; media_type: string; size: number }>
-          }
-        }
-      ) => {
-        callback(chunk)
-      }
-      ipcRenderer.on(IpcChannel.AgentSessionStream_Chunk, listener)
-      return () => ipcRenderer.off(IpcChannel.AgentSessionStream_Chunk, listener)
-    },
-    onSessionChanged: (
-      callback: (data: { agentId: string; sessionId: string; headless?: boolean }) => void
-    ): (() => void) => {
-      const listener = (
-        _event: Electron.IpcRendererEvent,
-        data: { agentId: string; sessionId: string; headless?: boolean }
-      ) => {
-        callback(data)
-      }
-      ipcRenderer.on(IpcChannel.AgentSession_Changed, listener)
-      return () => ipcRenderer.off(IpcChannel.AgentSession_Changed, listener)
-    }
   },
   wechat: {
     onQrLogin: (
@@ -611,7 +603,13 @@ const api = {
     ): (() => void) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
-        data: { channelId: string; agentId: string; url: string; status: string; userId?: string }
+        data: {
+          channelId: string
+          agentId: string
+          url: string
+          status: string
+          userId?: string
+        }
       ) => {
         callback(data)
       }
@@ -634,7 +632,14 @@ const api = {
     ): (() => void) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
-        data: { channelId: string; agentId: string; url: string; status: string; appId?: string; appSecret?: string }
+        data: {
+          channelId: string
+          agentId: string
+          url: string
+          status: string
+          appId?: string
+          appSecret?: string
+        }
       ) => {
         callback(data)
       }
@@ -648,7 +653,12 @@ const api = {
     ): (() => void) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
-        log: { timestamp: number; level: string; message: string; channelId: string }
+        log: {
+          timestamp: number
+          level: string
+          message: string
+          channelId: string
+        }
       ) => {
         callback(log)
       }
@@ -669,45 +679,31 @@ const api = {
     },
     getLogs: (
       channelId: string
-    ): Promise<Array<{ timestamp: number; level: string; message: string; channelId: string }>> =>
-      ipcRenderer.invoke(IpcChannel.Channel_GetLogs, channelId),
+    ): Promise<
+      Array<{
+        timestamp: number
+        level: string
+        message: string
+        channelId: string
+      }>
+    > => ipcRenderer.invoke(IpcChannel.Channel_GetLogs, channelId),
     getStatuses: (): Promise<Array<{ channelId: string; connected: boolean; error?: string }>> =>
       ipcRenderer.invoke(IpcChannel.Channel_GetStatuses)
   },
   quoteToMainWindow: (text: string) => ipcRenderer.invoke(IpcChannel.App_QuoteToMain, text),
-  setDisableHardwareAcceleration: (isDisable: boolean) =>
-    ipcRenderer.invoke(IpcChannel.App_SetDisableHardwareAcceleration, isDisable),
-  setUseSystemTitleBar: (isActive: boolean) => ipcRenderer.invoke(IpcChannel.App_SetUseSystemTitleBar, isActive),
+  // setDisableHardwareAcceleration: (isDisable: boolean) =>
+  //   ipcRenderer.invoke(IpcChannel.App_SetDisableHardwareAcceleration, isDisable),
+  // setUseSystemTitleBar: (isActive: boolean) => ipcRenderer.invoke(IpcChannel.App_SetUseSystemTitleBar, isActive),
   trace: {
     saveData: (topicId: string) => ipcRenderer.invoke(IpcChannel.TRACE_SAVE_DATA, topicId),
-    getData: (topicId: string, traceId: string, modelName?: string) =>
-      ipcRenderer.invoke(IpcChannel.TRACE_GET_DATA, topicId, traceId, modelName),
     saveEntity: (entity: SpanEntity) => ipcRenderer.invoke(IpcChannel.TRACE_SAVE_ENTITY, entity),
     getEntity: (spanId: string) => ipcRenderer.invoke(IpcChannel.TRACE_GET_ENTITY, spanId),
     bindTopic: (topicId: string, traceId: string) => ipcRenderer.invoke(IpcChannel.TRACE_BIND_TOPIC, topicId, traceId),
-    tokenUsage: (spanId: string, usage: TokenUsage) => ipcRenderer.invoke(IpcChannel.TRACE_TOKEN_USAGE, spanId, usage),
     cleanHistory: (topicId: string, traceId: string, modelName?: string) =>
       ipcRenderer.invoke(IpcChannel.TRACE_CLEAN_HISTORY, topicId, traceId, modelName),
-    cleanTopic: (topicId: string, traceId?: string) =>
-      ipcRenderer.invoke(IpcChannel.TRACE_CLEAN_TOPIC, topicId, traceId),
-    openWindow: (topicId: string, traceId: string, autoOpen?: boolean, modelName?: string) =>
-      ipcRenderer.invoke(IpcChannel.TRACE_OPEN_WINDOW, topicId, traceId, autoOpen, modelName),
-    setTraceWindowTitle: (title: string) => ipcRenderer.invoke(IpcChannel.TRACE_SET_TITLE, title),
-    addEndMessage: (spanId: string, modelName: string, context: string) =>
-      ipcRenderer.invoke(IpcChannel.TRACE_ADD_END_MESSAGE, spanId, modelName, context),
-    cleanLocalData: () => ipcRenderer.invoke(IpcChannel.TRACE_CLEAN_LOCAL_DATA),
-    addStreamMessage: (spanId: string, modelName: string, context: string, message: any) =>
-      ipcRenderer.invoke(IpcChannel.TRACE_ADD_STREAM_MESSAGE, spanId, modelName, context, message)
+    cleanLocalData: () => ipcRenderer.invoke(IpcChannel.TRACE_CLEAN_LOCAL_DATA)
   },
-  anthropic_oauth: {
-    startOAuthFlow: () => ipcRenderer.invoke(IpcChannel.Anthropic_StartOAuthFlow),
-    completeOAuthWithCode: (code: string) => ipcRenderer.invoke(IpcChannel.Anthropic_CompleteOAuthWithCode, code),
-    cancelOAuthFlow: () => ipcRenderer.invoke(IpcChannel.Anthropic_CancelOAuthFlow),
-    getAccessToken: () => ipcRenderer.invoke(IpcChannel.Anthropic_GetAccessToken),
-    hasCredentials: () => ipcRenderer.invoke(IpcChannel.Anthropic_HasCredentials),
-    clearCredentials: () => ipcRenderer.invoke(IpcChannel.Anthropic_ClearCredentials)
-  },
-  codeTools: {
+  codeCli: {
     run: (
       cliTool: string,
       model: string,
@@ -715,54 +711,231 @@ const api = {
       env: Record<string, string>,
       options?: { autoUpdateToLatest?: boolean; terminal?: string }
     ): Promise<CodeToolsRunResult> =>
-      ipcRenderer.invoke(IpcChannel.CodeTools_Run, cliTool, model, directory, env, options),
+      ipcRenderer.invoke(IpcChannel.CodeCli_Run, cliTool, model, directory, env, options),
     getAvailableTerminals: (): Promise<TerminalConfig[]> =>
-      ipcRenderer.invoke(IpcChannel.CodeTools_GetAvailableTerminals),
+      ipcRenderer.invoke(IpcChannel.CodeCli_GetAvailableTerminals),
     setCustomTerminalPath: (terminalId: string, path: string): Promise<void> =>
-      ipcRenderer.invoke(IpcChannel.CodeTools_SetCustomTerminalPath, terminalId, path),
+      ipcRenderer.invoke(IpcChannel.CodeCli_SetCustomTerminalPath, terminalId, path),
     getCustomTerminalPath: (terminalId: string): Promise<string | undefined> =>
-      ipcRenderer.invoke(IpcChannel.CodeTools_GetCustomTerminalPath, terminalId),
+      ipcRenderer.invoke(IpcChannel.CodeCli_GetCustomTerminalPath, terminalId),
     removeCustomTerminalPath: (terminalId: string): Promise<void> =>
-      ipcRenderer.invoke(IpcChannel.CodeTools_RemoveCustomTerminalPath, terminalId)
+      ipcRenderer.invoke(IpcChannel.CodeCli_RemoveCustomTerminalPath, terminalId)
   },
   ocr: {
     ocr: (file: SupportedOcrFile, provider: OcrProvider): Promise<OcrResult> =>
       ipcRenderer.invoke(IpcChannel.OCR_ocr, file, provider),
     listProviders: (): Promise<string[]> => ipcRenderer.invoke(IpcChannel.OCR_ListProviders)
   },
+  fileProcessing: {
+    startJob: (payload: {
+      feature: FileProcessorFeature
+      fileEntryId: FileEntryId
+      processorId?: FileProcessorId
+    }): Promise<JobSnapshot> => ipcRenderer.invoke(IpcChannel.FileProcessing_StartJob, payload),
+    listAvailableProcessors: (): Promise<ListAvailableFileProcessorsResult> =>
+      ipcRenderer.invoke(IpcChannel.FileProcessing_ListAvailableProcessors)
+  },
   cherryai: {
     generateSignature: (params: { method: string; path: string; query: string; body: Record<string, any> }) =>
       ipcRenderer.invoke(IpcChannel.Cherryai_GetSignature, params)
   },
-  windowControls: {
-    minimize: (): Promise<void> => ipcRenderer.invoke(IpcChannel.Windows_Minimize),
-    maximize: (): Promise<void> => ipcRenderer.invoke(IpcChannel.Windows_Maximize),
-    unmaximize: (): Promise<void> => ipcRenderer.invoke(IpcChannel.Windows_Unmaximize),
-    close: (): Promise<void> => ipcRenderer.invoke(IpcChannel.Windows_Close),
-    isMaximized: (): Promise<boolean> => ipcRenderer.invoke(IpcChannel.Windows_IsMaximized),
-    onMaximizedChange: (callback: (isMaximized: boolean) => void): (() => void) => {
-      const channel = IpcChannel.Windows_MaximizedChanged
-      const listener = (_: Electron.IpcRendererEvent, isMaximized: boolean) => callback(isMaximized)
+  webSearch: {
+    searchKeywords: (request: WebSearchSearchKeywordsRequest): Promise<WebSearchResponse> =>
+      ipcRenderer.invoke(IpcChannel.WebSearch_SearchKeywords, request),
+    fetchUrls: (request: WebSearchFetchUrlsRequest): Promise<WebSearchResponse> =>
+      ipcRenderer.invoke(IpcChannel.WebSearch_FetchUrls, request),
+    checkProvider: (request: WebSearchCheckProviderRequest): Promise<WebSearchCheckProviderResponse> =>
+      ipcRenderer.invoke(IpcChannel.WebSearch_CheckProvider, request)
+  },
+  shortcut: {
+    onRegistrationConflict: (callback: (payload: ShortcutRegistrationConflictPayload) => void): (() => void) => {
+      const channel = IpcChannel.Shortcut_RegistrationConflict
+      const listener = (_: Electron.IpcRendererEvent, payload: ShortcutRegistrationConflictPayload) => callback(payload)
       ipcRenderer.on(channel, listener)
       return () => {
         ipcRenderer.removeListener(channel, listener)
       }
     }
   },
-  apiServer: {
-    getStatus: (): Promise<GetApiServerStatusResult> => ipcRenderer.invoke(IpcChannel.ApiServer_GetStatus),
-    start: (): Promise<StartApiServerStatusResult> => ipcRenderer.invoke(IpcChannel.ApiServer_Start),
-    restart: (): Promise<RestartApiServerStatusResult> => ipcRenderer.invoke(IpcChannel.ApiServer_Restart),
-    stop: (): Promise<StopApiServerStatusResult> => ipcRenderer.invoke(IpcChannel.ApiServer_Stop),
-    onReady: (callback: () => void): (() => void) => {
-      const listener = () => {
-        callback()
-      }
-      ipcRenderer.on(IpcChannel.ApiServer_Ready, listener)
-      return () => {
-        ipcRenderer.removeListener(IpcChannel.ApiServer_Ready, listener)
-      }
+  // CacheService related APIs
+  cache: {
+    // Broadcast sync message to other windows
+    broadcastSync: (message: CacheSyncMessage): void => ipcRenderer.send(IpcChannel.Cache_Sync, message),
+
+    // Listen for sync messages from other windows
+    onSync: (callback: (message: CacheSyncMessage) => void) => {
+      const listener = (_: any, message: CacheSyncMessage) => callback(message)
+      ipcRenderer.on(IpcChannel.Cache_Sync, listener)
+      return () => ipcRenderer.off(IpcChannel.Cache_Sync, listener)
+    },
+
+    // Get all shared cache entries from Main for initialization sync
+    getAllShared: (): Promise<Record<string, CacheEntry>> => ipcRenderer.invoke(IpcChannel.Cache_GetAllShared)
+  },
+
+  // StorageMonitorService related APIs (main-process disk-space watcher)
+  storageMonitor: {
+    // Pull the current disk-space health to seed initial state on mount
+    getHealth: (): Promise<StorageHealth> => ipcRenderer.invoke(IpcChannel.StorageMonitor_GetHealth),
+
+    // Subscribe to health transitions (ok <-> low) pushed from Main
+    onHealthChange: (callback: (health: StorageHealth) => void) => {
+      const listener = (_: any, health: StorageHealth) => callback(health)
+      ipcRenderer.on(IpcChannel.StorageMonitor_HealthChanged, listener)
+      return () => ipcRenderer.off(IpcChannel.StorageMonitor_HealthChanged, listener)
     }
+  },
+
+  // PreferenceService related APIs
+  // DO NOT MODIFY THIS SECTION
+  preference: {
+    get: <K extends UnifiedPreferenceKeyType>(key: K): Promise<UnifiedPreferenceType[K]> =>
+      ipcRenderer.invoke(IpcChannel.Preference_Get, key),
+    set: <K extends UnifiedPreferenceKeyType>(key: K, value: UnifiedPreferenceType[K]): Promise<void> =>
+      ipcRenderer.invoke(IpcChannel.Preference_Set, key, value),
+    getMultipleRaw: <K extends UnifiedPreferenceKeyType>(keys: K[]): Promise<UnifiedPreferenceMultipleResultType<K>> =>
+      ipcRenderer.invoke(IpcChannel.Preference_GetMultipleRaw, keys),
+    setMultiple: (updates: Partial<UnifiedPreferenceType>) =>
+      ipcRenderer.invoke(IpcChannel.Preference_SetMultiple, updates),
+    getAll: (): Promise<UnifiedPreferenceType> => ipcRenderer.invoke(IpcChannel.Preference_GetAll),
+    subscribe: (keys: UnifiedPreferenceKeyType[]) => ipcRenderer.invoke(IpcChannel.Preference_Subscribe, keys),
+    onChanged: (callback: (key: UnifiedPreferenceKeyType, value: any) => void) => {
+      const listener = (_: any, key: UnifiedPreferenceKeyType, value: any) => callback(key, value)
+      ipcRenderer.on(IpcChannel.Preference_Changed, listener)
+      return () => ipcRenderer.off(IpcChannel.Preference_Changed, listener)
+    }
+  },
+  // Data API related APIs
+  dataApi: {
+    request: (req: any) => ipcRenderer.invoke(IpcChannel.DataApi_Request, req),
+    subscribe: (path: string, callback: (data: any, event: string) => void) => {
+      const channel = `${IpcChannel.DataApi_Stream}:${path}`
+      const listener = (_: any, data: any, event: string) => callback(data, event)
+      ipcRenderer.on(channel, listener)
+      return () => ipcRenderer.off(channel, listener)
+    }
+  },
+  topic: {
+    onAutoRenamed: (callback: (payload: { topicId: string }) => void) => {
+      const listener = (_: any, payload: { topicId: string }) => callback(payload)
+      ipcRenderer.on(IpcChannel.Topic_AutoRenamed, listener)
+      return () => ipcRenderer.off(IpcChannel.Topic_AutoRenamed, listener)
+    }
+  },
+  agentSession: {
+    onAutoRenamed: (callback: (payload: { sessionId: string }) => void) => {
+      const listener = (_: any, payload: { sessionId: string }) => callback(payload)
+      ipcRenderer.on(IpcChannel.AgentSession_AutoRenamed, listener)
+      return () => ipcRenderer.off(IpcChannel.AgentSession_AutoRenamed, listener)
+    }
+  },
+  ai: {
+    // ── Stream push listeners ──
+    onStreamChunk: (callback: (data: StreamChunkPayload) => void) => {
+      const listener = (_: Electron.IpcRendererEvent, data: StreamChunkPayload) => callback(data)
+      ipcRenderer.on(IpcChannel.Ai_StreamChunk, listener)
+      return () => ipcRenderer.removeListener(IpcChannel.Ai_StreamChunk, listener)
+    },
+    onStreamDone: (callback: (data: StreamDonePayload) => void) => {
+      const listener = (_: Electron.IpcRendererEvent, data: StreamDonePayload) => callback(data)
+      ipcRenderer.on(IpcChannel.Ai_StreamDone, listener)
+      return () => ipcRenderer.removeListener(IpcChannel.Ai_StreamDone, listener)
+    },
+    onStreamError: (callback: (data: StreamErrorPayload) => void) => {
+      const listener = (_: Electron.IpcRendererEvent, data: StreamErrorPayload) => callback(data)
+      ipcRenderer.on(IpcChannel.Ai_StreamError, listener)
+      return () => ipcRenderer.removeListener(IpcChannel.Ai_StreamError, listener)
+    },
+
+    // ── Stream control ──
+    streamOpen: (req: AiStreamOpenRequest): Promise<AiStreamOpenResponse> =>
+      ipcRenderer.invoke(IpcChannel.Ai_Stream_Open, req),
+    streamAttach: (req: AiStreamAttachRequest): Promise<AiStreamAttachResponse> =>
+      ipcRenderer.invoke(IpcChannel.Ai_Stream_Attach, req),
+    streamDetach: (req: AiStreamDetachRequest): Promise<void> => ipcRenderer.invoke(IpcChannel.Ai_Stream_Detach, req),
+    streamAbort: (req: AiStreamAbortRequest): Promise<void> => ipcRenderer.invoke(IpcChannel.Ai_Stream_Abort, req),
+    prewarmAgentSession: (req: AiAgentSessionWarmRequest): Promise<void> =>
+      ipcRenderer.invoke(IpcChannel.Ai_AgentSession_Prewarm, req),
+    closeAgentSessionWarm: (req: AiAgentSessionWarmCloseRequest): Promise<void> =>
+      ipcRenderer.invoke(IpcChannel.Ai_AgentSession_CloseWarm, req),
+
+    // ── Non-streaming operations ──
+    // All use uniqueModelId ("providerId::modelId") instead of separate providerId/modelId.
+    generateText: (request: {
+      assistantId?: string
+      uniqueModelId?: string
+      system?: string
+      prompt?: string
+      messages?: unknown[]
+      mcpToolIds?: string[]
+    }): Promise<{ text: string; usage?: unknown }> => ipcRenderer.invoke(IpcChannel.Ai_GenerateText, request),
+    checkModel: (request: { uniqueModelId?: string; timeout?: number }): Promise<{ latency: number }> =>
+      ipcRenderer.invoke(IpcChannel.Ai_CheckModel, request),
+    embedMany: (request: {
+      uniqueModelId?: string
+      values: string[]
+    }): Promise<{ embeddings: number[][]; usage?: unknown }> => ipcRenderer.invoke(IpcChannel.Ai_EmbedMany, request),
+    generateImage: async (
+      payload: {
+        uniqueModelId?: string
+        prompt: string
+        inputImages?: string[]
+        mask?: string
+        n?: number
+        size?: string
+        negativePrompt?: string
+        seed?: number
+        quality?: string
+        numInferenceSteps?: number
+        guidanceScale?: number
+        promptEnhancement?: boolean
+        personGeneration?: string
+        aspectRatio?: string
+        background?: string
+        moderation?: string
+        style?: string
+        providerOptions?: Record<string, Record<string, unknown>>
+      },
+      requestId: string
+    ): Promise<{ files: FileEntry[] }> => ipcRenderer.invoke(IpcChannel.Ai_GenerateImage, { requestId, payload }),
+    abortImage: (requestId: string): void => {
+      ipcRenderer.send(IpcChannel.Ai_AbortImage, { requestId })
+    },
+    listModels: (request: {
+      providerId?: string
+      assistantId?: string
+      throwOnError?: boolean
+    }): Promise<Partial<Model>[]> => ipcRenderer.invoke(IpcChannel.Ai_ListModels, request),
+
+    // ── Tool approval (v6 ToolUIPart native flow) ──
+    toolApproval: {
+      respond: (payload: {
+        approvalId: string
+        approved: boolean
+        reason?: string
+        updatedInput?: Record<string, unknown>
+        topicId?: string
+        anchorId?: string
+      }): Promise<{ ok: boolean }> => ipcRenderer.invoke(IpcChannel.Ai_ToolApproval_Respond, payload)
+    },
+    agent: {
+      runTask: (taskId: string) => ipcRenderer.invoke(IpcChannel.Ai_Agent_RunTask, taskId)
+    }
+  },
+  translate: {
+    open: (req: {
+      streamId: string
+      text: string
+      targetLangCode: string
+      /** Optional — when present, main persists the translation onto this message's parts on stream success. */
+      messageId?: string
+      sourceLangCode?: string
+    }): Promise<{ streamId: string }> => ipcRenderer.invoke(IpcChannel.Ai_Translate_Open, req)
+  },
+  apiGateway: {
+    start: (): Promise<ApiGatewayStatusResult> => ipcRenderer.invoke(IpcChannel.ApiGateway_Start),
+    restart: (): Promise<ApiGatewayStatusResult> => ipcRenderer.invoke(IpcChannel.ApiGateway_Restart),
+    stop: (): Promise<ApiGatewayStatusResult> => ipcRenderer.invoke(IpcChannel.ApiGateway_Stop)
   },
   skill: {
     list: (agentId?: string): Promise<SkillResult<InstalledSkill[]>> =>
@@ -783,23 +956,23 @@ const api = {
     listLocal: (workdir: string): Promise<SkillResult<LocalSkill[]>> =>
       ipcRenderer.invoke(IpcChannel.Skill_ListLocal, workdir)
   },
-  localTransfer: {
-    getState: (): Promise<LocalTransferState> => ipcRenderer.invoke(IpcChannel.LocalTransfer_ListServices),
-    startScan: (): Promise<LocalTransferState> => ipcRenderer.invoke(IpcChannel.LocalTransfer_StartScan),
-    stopScan: (): Promise<LocalTransferState> => ipcRenderer.invoke(IpcChannel.LocalTransfer_StopScan),
-    connect: (payload: LocalTransferConnectPayload): Promise<LanHandshakeAckMessage> =>
-      ipcRenderer.invoke(IpcChannel.LocalTransfer_Connect, payload),
-    disconnect: (): Promise<void> => ipcRenderer.invoke(IpcChannel.LocalTransfer_Disconnect),
-    onServicesUpdated: (callback: (state: LocalTransferState) => void): (() => void) => {
-      const channel = IpcChannel.LocalTransfer_ServicesUpdated
-      const listener = (_: Electron.IpcRendererEvent, state: LocalTransferState) => callback(state)
+  lanTransfer: {
+    getState: (): Promise<LanTransferState> => ipcRenderer.invoke(IpcChannel.LanTransfer_ListServices),
+    startScan: (): Promise<LanTransferState> => ipcRenderer.invoke(IpcChannel.LanTransfer_StartScan),
+    stopScan: (): Promise<LanTransferState> => ipcRenderer.invoke(IpcChannel.LanTransfer_StopScan),
+    connect: (payload: LanTransferConnectPayload): Promise<LanHandshakeAckMessage> =>
+      ipcRenderer.invoke(IpcChannel.LanTransfer_Connect, payload),
+    disconnect: (): Promise<void> => ipcRenderer.invoke(IpcChannel.LanTransfer_Disconnect),
+    onServicesUpdated: (callback: (state: LanTransferState) => void): (() => void) => {
+      const channel = IpcChannel.LanTransfer_ServicesUpdated
+      const listener = (_: Electron.IpcRendererEvent, state: LanTransferState) => callback(state)
       ipcRenderer.on(channel, listener)
       return () => {
         ipcRenderer.removeListener(channel, listener)
       }
     },
     onClientEvent: (callback: (event: LanClientEvent) => void): (() => void) => {
-      const channel = IpcChannel.LocalTransfer_ClientEvent
+      const channel = IpcChannel.LanTransfer_ClientEvent
       const listener = (_: Electron.IpcRendererEvent, event: LanClientEvent) => callback(event)
       ipcRenderer.on(channel, listener)
       return () => {
@@ -807,12 +980,15 @@ const api = {
       }
     },
     sendFile: (filePath: string): Promise<LanFileCompleteMessage> =>
-      ipcRenderer.invoke(IpcChannel.LocalTransfer_SendFile, { filePath }),
-    cancelTransfer: (): Promise<void> => ipcRenderer.invoke(IpcChannel.LocalTransfer_CancelTransfer)
+      ipcRenderer.invoke(IpcChannel.LanTransfer_SendFile, { filePath }),
+    cancelTransfer: (): Promise<void> => ipcRenderer.invoke(IpcChannel.LanTransfer_CancelTransfer)
   },
   openclaw: {
-    checkInstalled: (): Promise<{ installed: boolean; path: string | null; needsMigration: boolean }> =>
-      ipcRenderer.invoke(IpcChannel.OpenClaw_CheckInstalled),
+    checkInstalled: (): Promise<{
+      installed: boolean
+      path: string | null
+      needsMigration: boolean
+    }> => ipcRenderer.invoke(IpcChannel.OpenClaw_CheckInstalled),
     install: (): Promise<OperationResult> => ipcRenderer.invoke(IpcChannel.OpenClaw_Install),
     uninstall: (): Promise<OperationResult> => ipcRenderer.invoke(IpcChannel.OpenClaw_Uninstall),
     startGateway: (port?: number): Promise<OperationResult> =>
@@ -822,8 +998,8 @@ const api = {
       ipcRenderer.invoke(IpcChannel.OpenClaw_GetStatus),
     checkHealth: (): Promise<OpenClawHealthInfo> => ipcRenderer.invoke(IpcChannel.OpenClaw_CheckHealth),
     getDashboardUrl: (): Promise<string> => ipcRenderer.invoke(IpcChannel.OpenClaw_GetDashboardUrl),
-    syncConfig: (provider: Provider, primaryModel: Model): Promise<OperationResult> =>
-      ipcRenderer.invoke(IpcChannel.OpenClaw_SyncConfig, provider, primaryModel),
+    syncConfig: (uniqueModelId: string): Promise<OperationResult> =>
+      ipcRenderer.invoke(IpcChannel.OpenClaw_SyncConfig, uniqueModelId),
     getChannels: (): Promise<OpenClawChannelInfo[]> => ipcRenderer.invoke(IpcChannel.OpenClaw_GetChannels),
     checkUpdate: (): Promise<{
       hasUpdate: boolean
