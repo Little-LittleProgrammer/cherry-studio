@@ -12,23 +12,18 @@ import {
   Label
 } from '@cherrystudio/ui'
 import { loggerService } from '@logger'
-import CustomTag from '@renderer/components/Tags/CustomTag'
-import { TopView } from '@renderer/components/TopView'
+import CustomTag from '@renderer/components/tags/CustomTag'
+import { TopView } from '@renderer/components/TopView/TopView'
 import { useKnowledgeBases } from '@renderer/hooks/useKnowledgeBase'
 import { useAddKnowledgeItems } from '@renderer/hooks/useKnowledgeItems'
-import type { Topic } from '@renderer/types'
-import type { Message } from '@renderer/types/newMessage'
+import { analyzeTopicContent, processTopicContent } from '@renderer/services/knowledgeContent'
+import type { ExportableMessage } from '@renderer/types/messageExport'
 import type { NotesTreeNode } from '@renderer/types/note'
+import type { Topic } from '@renderer/types/topic'
 import type { ContentType, MessageContentStats, TopicContentStats } from '@renderer/utils/knowledge'
-import {
-  analyzeMessageContent,
-  analyzeTopicContent,
-  CONTENT_TYPES,
-  processMessageContent,
-  processTopicContent
-} from '@renderer/utils/knowledge'
+import { analyzeMessageContent, CONTENT_TYPES, processMessageContent } from '@renderer/utils/knowledge'
 import { resolveKnowledgeFileMetadataEntryData } from '@renderer/utils/knowledgeFileEntry'
-import type { KnowledgeRuntimeAddItemInput } from '@shared/data/types/knowledge'
+import type { KnowledgeAddItemInput } from '@shared/data/types/knowledge'
 import { Check } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -90,7 +85,7 @@ interface ContentTypeOption {
 }
 
 type ContentSource =
-  | { type: 'message'; data: Message }
+  | { type: 'message'; data: ExportableMessage }
   | { type: 'topic'; data: Topic }
   | { type: 'note'; data: NotesTreeNode }
 
@@ -305,7 +300,7 @@ const PopupContainer: React.FC<Props> = ({ source, title, resolve }) => {
         throw new Error('Knowledge base is not properly configured. Please check the knowledge base settings.')
       }
 
-      const items: KnowledgeRuntimeAddItemInput[] = []
+      const items: KnowledgeAddItemInput[] = []
       const noteSource = getNoteSource(source, title)
 
       if (isNoteMode) {
@@ -511,7 +506,7 @@ const PopupContainer: React.FC<Props> = ({ source, title, resolve }) => {
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onCancel()}>
-      <DialogContent className="sm:max-w-[500px]">
+      <DialogContent closeOnOverlayClick={false} className="sm:max-w-[500px]">
         <DialogHeader>
           <DialogTitle>
             {title ||
@@ -560,7 +555,7 @@ export default class SaveToKnowledgePopup {
     })
   }
 
-  static showForMessage(message: Message, title?: string): Promise<SaveResult | null> {
+  static showForMessage(message: ExportableMessage, title?: string): Promise<SaveResult | null> {
     return this.show({ source: { type: 'message', data: message }, title })
   }
 

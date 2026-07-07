@@ -1,20 +1,18 @@
 import { loggerService } from '@logger'
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import type { BuiltinMcpServerName } from '@types'
-import { BuiltinMcpServerNames } from '@types'
+import { type BuiltinMcpServerName, BuiltinMcpServerNames } from '@shared/utils/mcp'
 
 import BraveSearchServer from './brave-search'
-import BrowserServer from './browser'
+import { BrowserServer } from './browser'
 import DiDiMcpServer from './didi-mcp'
 import DifyKnowledgeServer from './dify-knowledge'
 import FetchServer from './fetch'
-import FileSystemServer from './filesystem'
-import { resolveFilesystemBaseDir } from './filesystem/config'
+import { FileSystemServer, resolveFilesystemBaseDir } from './filesystem'
 import MemoryServer from './memory'
 import PythonServer from './python'
 import ThinkingServer from './sequentialthinking'
 
-const logger = loggerService.withContext('MCPFactory')
+const logger = loggerService.withContext('McpFactory')
 
 export function createInMemoryMcpServer(
   name: BuiltinMcpServerName,

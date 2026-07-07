@@ -11,8 +11,8 @@ import {
   Tooltip
 } from '@cherrystudio/ui'
 import { restoreFromS3 } from '@renderer/services/BackupService'
-import type { S3Config } from '@renderer/types'
-import { formatFileSize } from '@renderer/utils'
+import { formatFileSize } from '@renderer/utils/file'
+import type { S3Config } from '@shared/types/backup'
 import dayjs from 'dayjs'
 import { ChevronLeft, ChevronRight, CircleAlert, RefreshCw, Trash2 } from 'lucide-react'
 import type { Key } from 'react'
@@ -227,12 +227,12 @@ export function S3BackupManager({ visible, onClose, s3Config, restoreMethod }: S
     {
       accessorKey: 'fileName',
       header: t('settings.data.s3.manager.columns.fileName'),
-      meta: { width: 'calc(100% - 460px)', className: 'min-w-0' },
+      meta: { width: 'calc(100% - 504px)', className: 'min-w-0' },
       cell: ({ getValue }) => {
         const fileName = getValue() as string
         return (
-          <Tooltip placement="top-start" content={fileName}>
-            <span className="block truncate">{fileName}</span>
+          <Tooltip placement="top-start" content={fileName} fullWidthTrigger>
+            <span className="block w-full min-w-0 truncate">{fileName}</span>
           </Tooltip>
         )
       }

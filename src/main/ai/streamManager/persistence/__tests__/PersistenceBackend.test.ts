@@ -8,9 +8,9 @@
  */
 
 import type { CherryMessagePart } from '@shared/data/types/message'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { finalizeInterruptedParts } from '../PersistenceBackend'
+import { dropEmptyContentParts, finalizeInterruptedParts } from '../PersistenceBackend'
 
 // AI SDK tool-call UIMessagePart shapes. The non-terminal states the helper
 // targets are anything NOT in {output-available, output-error, output-denied}.
@@ -37,6 +37,10 @@ function inProgressDynamicToolPart(): CherryMessagePart {
 const textPart = (text: string): CherryMessagePart => ({ type: 'text', text }) as unknown as CherryMessagePart
 
 describe('finalizeInterruptedParts', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it('returns parts unchanged (by reference) on success', () => {
     const parts: CherryMessagePart[] = [textPart('hi'), inProgressToolPart('input-available')]
 
@@ -166,5 +170,96 @@ describe('finalizeInterruptedParts', () => {
     expect(result[1]).toBe(reasoning)
     // only the tool part is rewritten
     expect(result[2]).toMatchObject({ state: 'output-error', errorText: 'Stream errored before tool completed' })
+  })
+
+  it('rewrites a streaming reasoning part to done and calculates thinkingMs if startedAt is provided', () => {
+    const baseTime = 1780913860106
+    vi.spyOn(Date, 'now').mockReturnValue(baseTime)
+    const startedAt = baseTime - 5000 // 5 seconds ago
+    const streamingReasoning = {
+      type: 'reasoning',
+      text: 'thinking...',
+      state: 'streaming',
+      providerMetadata: {
+        cherry: {
+          startedAt
+        }
+      }
+    } as unknown as CherryMessagePart
+
+    const result = finalizeInterruptedParts([streamingReasoning], 'paused')
+
+    expect(result[0]).toMatchObject({
+      type: 'reasoning',
+      state: 'done'
+    })
+    const cherryMeta = (result[0] as any).providerMetadata?.cherry
+    expect(cherryMeta?.thinkingMs).toBe(5000)
+  })
+
+  it('rewrites a streaming reasoning part to done but leaves thinkingMs undefined if startedAt is missing', () => {
+    const streamingReasoning = {
+      type: 'reasoning',
+      text: 'thinking...',
+      state: 'streaming'
+    } as unknown as CherryMessagePart
+
+    const result = finalizeInterruptedParts([streamingReasoning], 'paused')
+
+    expect(result[0]).toMatchObject({
+      type: 'reasoning',
+      state: 'done'
+    })
+    const cherryMeta = (result[0] as any).providerMetadata?.cherry
+    expect(cherryMeta?.thinkingMs).toBeUndefined()
+  })
+})
+
+const reasoningPart = (text: string): CherryMessagePart =>
+  ({ type: 'reasoning', text, state: 'done' }) as unknown as CherryMessagePart
+
+describe('dropEmptyContentParts', () => {
+  it('drops empty and whitespace-only text parts', () => {
+    const keep = textPart('answer')
+    const result = dropEmptyContentParts([textPart(''), keep, textPart('   \n  ')])
+
+    expect(result).toEqual([keep])
+  })
+
+  it('drops empty and whitespace-only reasoning parts', () => {
+    const keep = reasoningPart('real thought')
+    const result = dropEmptyContentParts([reasoningPart(''), keep, reasoningPart('  ')])
+
+    expect(result).toEqual([keep])
+  })
+
+  it('keeps non-text/reasoning parts even when they look empty', () => {
+    const parts: CherryMessagePart[] = [
+      { type: 'data-translation', data: { content: '' } } as unknown as CherryMessagePart,
+      {
+        type: 'tool-search',
+        toolCallId: 't',
+        toolName: 'search',
+        state: 'output-available',
+        output: {}
+      } as unknown as CherryMessagePart
+    ]
+
+    const result = dropEmptyContentParts(parts)
+
+    expect(result).toBe(parts)
+  })
+
+  it('returns the original array by reference when nothing is dropped', () => {
+    const parts: CherryMessagePart[] = [textPart('hi'), reasoningPart('thinking')]
+
+    expect(dropEmptyContentParts(parts)).toBe(parts)
+  })
+
+  it('drops a trailing empty text part next to a reasoning part', () => {
+    const reasoning = reasoningPart('deep thought')
+    const result = dropEmptyContentParts([reasoning, textPart('')])
+
+    expect(result).toEqual([reasoning])
   })
 })

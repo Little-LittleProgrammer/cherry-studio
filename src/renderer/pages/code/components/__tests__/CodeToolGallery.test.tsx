@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest'
 
-import { codeCLI } from '@shared/config/constant'
+import { CodeCli } from '@shared/types/codeCli'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -37,13 +37,13 @@ vi.mock('../CodeHeroIllustrationIcon', () => ({
 }))
 
 const claudeTool = {
-  value: codeCLI.claudeCode,
+  value: CodeCli.CLAUDE_CODE,
   label: 'Claude Code',
   icon: () => <span />
 } as const
 
 const codexTool = {
-  value: codeCLI.openaiCodex,
+  value: CodeCli.OPENAI_CODEX,
   label: 'OpenAI Codex',
   icon: () => <span />
 } as const
@@ -70,8 +70,9 @@ afterEach(() => {
 
 describe('CodeToolGallery', () => {
   it('renders the hero illustration and Bun requirement prompt', () => {
-    renderGallery({ tools: [claudeTool] })
+    const { container } = renderGallery({ tools: [claudeTool] })
 
+    expect(container.firstElementChild).toHaveClass('min-h-0', 'overflow-y-auto')
     expect(screen.getByTestId('hero-code-illustration')).toBeInTheDocument()
     expect(screen.getByText('code.hero_tagline')).toBeInTheDocument()
     expect(screen.getByText('code.bun_required_message')).toBeInTheDocument()

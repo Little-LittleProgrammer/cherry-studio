@@ -19,6 +19,11 @@
  */
 
 import { loggerService } from '@logger'
+import {
+  SIDEBAR_FAVORITES,
+  type SidebarFavorite,
+  type SidebarFavoriteItem
+} from '@shared/data/preference/preferenceTypes'
 
 import { type LegacyModelRef, legacyModelToUniqueId } from '../transformers/ModelTransformers'
 import {
@@ -37,6 +42,12 @@ import {
 } from './TranslateTransforms'
 
 const logger = loggerService.withContext('Migration:ComplexPreferenceMappings')
+
+const SUPPORTED_SIDEBAR_FAVORITES = new Set<SidebarFavorite>(SIDEBAR_FAVORITES)
+
+function isSupportedSidebarFavorite(value: unknown): value is SidebarFavorite {
+  return typeof value === 'string' && SUPPORTED_SIDEBAR_FAVORITES.has(value as SidebarFavorite)
+}
 
 // ============================================================================
 // Type Definitions
@@ -158,21 +169,47 @@ export const COMPLEX_PREFERENCE_MAPPINGS: ComplexMapping[] = [
     transform: transformShortcuts
   },
 
-  // Sidebar icons: rewrite 'minapp' → 'mini_app' (v1→v2 rename)
+  // Sidebar favorites: migrate legacy v1 sidebarIcons.visible, rewrite 'minapp' → 'mini_app',
+  // preserve the user's visible order, and restore the v2 agents favorite unless explicitly hidden.
   {
-    id: 'sidebar_icons_rename',
-    description: "Rewrite legacy 'minapp' icon key to 'mini_app' in sidebar icon arrays",
+    id: 'sidebar_favorites_migrate',
+    description:
+      "Migrate legacy v1 sidebarIcons.visible to v2 favorites, rewrite 'minapp' to 'mini_app', preserve visible items, and restore agents",
     sources: {
       visible: { source: 'redux', category: 'settings', key: 'sidebarIcons.visible' },
       disabled: { source: 'redux', category: 'settings', key: 'sidebarIcons.disabled' }
     },
-    targetKeys: ['ui.sidebar.icons.visible', 'ui.sidebar.icons.invisible'],
+    targetKeys: ['ui.sidebar.favorites'],
     transform: (sources) => {
-      const rewrite = (arr: unknown): unknown =>
-        Array.isArray(arr) ? arr.map((v) => (v === 'minapp' ? 'mini_app' : v)) : arr
+      const rewrite = (arr: unknown): SidebarFavorite[] | undefined =>
+        Array.isArray(arr)
+          ? arr.map((v) => (v === 'minapp' ? 'mini_app' : v)).filter(isSupportedSidebarFavorite)
+          : undefined
+      const toSidebarFavorites = (arr: SidebarFavorite[] | undefined): SidebarFavoriteItem[] | undefined =>
+        arr?.map((id) => ({ type: 'app', id }))
+      const addAgents = (
+        visible: SidebarFavorite[] | undefined,
+        invisible: SidebarFavorite[] | undefined
+      ): SidebarFavorite[] | undefined => {
+        if (!visible || visible.includes('agents')) {
+          return visible
+        }
+        if (invisible?.includes('agents')) {
+          return visible
+        }
+
+        const nextVisible = [...visible]
+        const assistantsIndex = nextVisible.indexOf('assistants')
+        nextVisible.splice(assistantsIndex === -1 ? nextVisible.length : assistantsIndex + 1, 0, 'agents')
+        return nextVisible
+      }
+      const dedup = (arr: SidebarFavorite[] | undefined): SidebarFavorite[] | undefined =>
+        arr ? [...new Set(arr)] : undefined
+      const visible = rewrite(sources.visible)
+      const invisible = rewrite(sources.disabled)
+      const visibleWithAgents = dedup(addAgents(visible, invisible))
       return {
-        'ui.sidebar.icons.visible': rewrite(sources.visible),
-        'ui.sidebar.icons.invisible': rewrite(sources.disabled)
+        'ui.sidebar.favorites': toSidebarFavorites(visibleWithAgents)
       }
     }
   },

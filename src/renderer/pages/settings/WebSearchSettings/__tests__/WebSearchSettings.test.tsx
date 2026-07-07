@@ -6,11 +6,10 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type * as ReactI18next from 'react-i18next'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import WebSearchSettings from '..'
 import type * as WebSearchApiKeyListHook from '../hooks/useWebSearchApiKeyList'
+import WebSearchSettings from '../WebSearchSettings'
 
-const searchKeywordsMock = vi.fn()
-const fetchUrlsMock = vi.fn()
+const ipcRequestMock = vi.hoisted(() => vi.fn())
 const toastSuccessMock = vi.fn()
 const toastErrorMock = vi.fn()
 const toastInfoMock = vi.fn()
@@ -29,6 +28,12 @@ vi.mock('react-i18next', async (importOriginal) => {
 
 vi.mock('@tanstack/react-router', () => ({
   useNavigate: () => vi.fn()
+}))
+
+vi.mock('@renderer/ipc', () => ({
+  ipcApi: {
+    request: ipcRequestMock
+  }
 }))
 
 vi.mock('@renderer/components/Scrollbar', () => ({
@@ -99,22 +104,6 @@ vi.mock('@cherrystudio/ui', async (importOriginal) => ({
     </button>
   ),
   SelectValue: ({ placeholder }: { placeholder?: string }) => <span>{placeholder}</span>,
-  Slider: ({
-    value,
-    onValueChange,
-    onValueCommit
-  }: {
-    value?: number[]
-    onValueChange?: (value: number[]) => void
-    onValueCommit?: (value: number[]) => void
-  }) => (
-    <div>
-      <div data-testid="slider">{value?.[0]}</div>
-      <button type="button" aria-label="slider-change-10" onClick={() => onValueChange?.([10])} />
-      <button type="button" aria-label="slider-change-20" onClick={() => onValueChange?.([20])} />
-      <button type="button" aria-label="slider-commit-10" onClick={() => onValueCommit?.([10])} />
-    </div>
-  ),
   Textarea: {
     Input: (props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) => <textarea {...props} />
   },
@@ -135,13 +124,6 @@ describe('WebSearchSettings', () => {
     vi.clearAllMocks()
     MockUsePreferenceUtils.resetMocks()
     Object.assign(window, {
-      api: {
-        ...window.api,
-        webSearch: {
-          searchKeywords: searchKeywordsMock,
-          fetchUrls: fetchUrlsMock
-        }
-      },
       toast: {
         ...window.toast,
         success: toastSuccessMock,
@@ -149,8 +131,7 @@ describe('WebSearchSettings', () => {
         info: toastInfoMock
       }
     })
-    searchKeywordsMock.mockResolvedValue({ results: [] })
-    fetchUrlsMock.mockResolvedValue({ results: [] })
+    ipcRequestMock.mockResolvedValue({ results: [] })
     MockUsePreferenceUtils.setPreferenceValue('chat.web_search.provider_overrides', {})
     MockUsePreferenceUtils.setPreferenceValue('chat.web_search.default_search_keywords_provider', 'tavily')
     MockUsePreferenceUtils.setPreferenceValue('chat.web_search.default_fetch_urls_provider', 'fetch')
@@ -184,31 +165,35 @@ describe('WebSearchSettings', () => {
   it('syncs clean max-result drafts from external preference changes', () => {
     const { rerender } = render(<WebSearchSettings />)
 
-    expect(screen.getByTestId('slider')).toHaveTextContent('5')
+    expect(screen.getByLabelText('settings.tool.websearch.search_max_result.label')).toHaveValue(5)
 
     MockUsePreferenceUtils.simulateExternalPreferenceChange('chat.web_search.max_results', 20)
     rerender(<WebSearchSettings />)
 
-    expect(screen.getByTestId('slider')).toHaveTextContent('20')
+    expect(screen.getByLabelText('settings.tool.websearch.search_max_result.label')).toHaveValue(20)
   })
 
   it('keeps dirty max-result drafts when maxResults changes externally', () => {
     const { rerender } = render(<WebSearchSettings />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'slider-change-10' }))
-    expect(screen.getByTestId('slider')).toHaveTextContent('10')
+    fireEvent.change(screen.getByLabelText('settings.tool.websearch.search_max_result.label'), {
+      target: { value: '10' }
+    })
+    expect(screen.getByLabelText('settings.tool.websearch.search_max_result.label')).toHaveValue(10)
 
     MockUsePreferenceUtils.simulateExternalPreferenceChange('chat.web_search.max_results', 20)
     rerender(<WebSearchSettings />)
 
-    expect(screen.getByTestId('slider')).toHaveTextContent('10')
+    expect(screen.getByLabelText('settings.tool.websearch.search_max_result.label')).toHaveValue(10)
   })
 
   it('marks max-result drafts clean after a successful commit', async () => {
     const { rerender } = render(<WebSearchSettings />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'slider-change-10' }))
-    fireEvent.click(screen.getByRole('button', { name: 'slider-commit-10' }))
+    fireEvent.change(screen.getByLabelText('settings.tool.websearch.search_max_result.label'), {
+      target: { value: '10' }
+    })
+    fireEvent.blur(screen.getByLabelText('settings.tool.websearch.search_max_result.label'))
 
     await waitFor(() => {
       expect(MockUsePreferenceUtils.getPreferenceValue('chat.web_search.max_results')).toBe(10)
@@ -218,7 +203,48 @@ describe('WebSearchSettings', () => {
     rerender(<WebSearchSettings />)
 
     await waitFor(() => {
-      expect(screen.getByTestId('slider')).toHaveTextContent('20')
+      expect(screen.getByLabelText('settings.tool.websearch.search_max_result.label')).toHaveValue(20)
+    })
+  })
+
+  it.each([
+    ['1000', 100],
+    ['-3', 1],
+    ['abc', 1],
+    ['3.9', 3]
+  ])('clamps max-result draft %s to %s on commit', async (value, expected) => {
+    render(<WebSearchSettings />)
+
+    fireEvent.change(screen.getByLabelText('settings.tool.websearch.search_max_result.label'), {
+      target: { value }
+    })
+    fireEvent.blur(screen.getByLabelText('settings.tool.websearch.search_max_result.label'))
+
+    await waitFor(() => {
+      expect(MockUsePreferenceUtils.getPreferenceValue('chat.web_search.max_results')).toBe(expected)
+      expect(screen.getByLabelText('settings.tool.websearch.search_max_result.label')).toHaveValue(expected)
+    })
+  })
+
+  it('resets max results to the default value when customized', async () => {
+    render(<WebSearchSettings />)
+
+    expect(screen.queryByRole('button', { name: 'common.reset' })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('settings.tool.websearch.search_max_result.label'), {
+      target: { value: '10' }
+    })
+    fireEvent.blur(screen.getByLabelText('settings.tool.websearch.search_max_result.label'))
+
+    await waitFor(() => {
+      expect(MockUsePreferenceUtils.getPreferenceValue('chat.web_search.max_results')).toBe(10)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'common.reset' }))
+
+    await waitFor(() => {
+      expect(MockUsePreferenceUtils.getPreferenceValue('chat.web_search.max_results')).toBe(5)
+      expect(screen.getByLabelText('settings.tool.websearch.search_max_result.label')).toHaveValue(5)
     })
   })
 
@@ -351,7 +377,10 @@ describe('WebSearchSettings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'settings.tool.websearch.check' }))
 
     await waitFor(() => {
-      expect(searchKeywordsMock).toHaveBeenCalledWith({ providerId: 'tavily', keywords: ['Cherry Studio'] })
+      expect(ipcRequestMock).toHaveBeenCalledWith('web_search.search_keywords', {
+        providerId: 'tavily',
+        keywords: ['Cherry Studio']
+      })
     })
     expect(MockUsePreferenceUtils.getPreferenceValue('chat.web_search.provider_overrides')).toMatchObject({
       tavily: { apiKeys: ['tavily-key'] }
@@ -382,13 +411,16 @@ describe('WebSearchSettings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'settings.tool.websearch.check' }))
 
     await waitFor(() => {
-      expect(fetchUrlsMock).toHaveBeenCalledWith({ providerId: 'jina', urls: ['https://example.com'] })
+      expect(ipcRequestMock).toHaveBeenCalledWith('web_search.fetch_urls', {
+        providerId: 'jina',
+        urls: ['https://example.com']
+      })
     })
-    expect(searchKeywordsMock).not.toHaveBeenCalled()
+    expect(ipcRequestMock).not.toHaveBeenCalledWith('web_search.search_keywords', expect.anything())
   })
 
   it('shows a failed check toast when the IPC request rejects', async () => {
-    searchKeywordsMock.mockRejectedValue(new Error('check failed'))
+    ipcRequestMock.mockRejectedValue(new Error('check failed'))
 
     render(<WebSearchSettings />)
 
@@ -414,7 +446,7 @@ describe('WebSearchSettings', () => {
     await waitFor(() => {
       expect(toastErrorMock).toHaveBeenCalledWith('settings.tool.websearch.errors.save_failed')
     })
-    expect(searchKeywordsMock).not.toHaveBeenCalled()
+    expect(ipcRequestMock).not.toHaveBeenCalled()
   })
 
   it('shows a fallback instead of throwing when the API key list provider is missing', async () => {

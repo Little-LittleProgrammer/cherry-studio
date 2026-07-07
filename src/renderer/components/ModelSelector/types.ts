@@ -1,6 +1,6 @@
-import type { CommandId } from '@shared/command'
 import type { Model, UniqueModelId } from '@shared/data/types/model'
 import type { Provider } from '@shared/data/types/provider'
+import type { CommandId } from '@shared/utils/command'
 import type { ReactNode } from 'react'
 
 import type { ModelSelectorTag } from './filters'
@@ -8,6 +8,7 @@ import type { ModelSelectorTag } from './filters'
 export type ModelSelectorSide = 'top' | 'right' | 'bottom' | 'left'
 export type ModelSelectorAlign = 'start' | 'center' | 'end'
 export type ModelSelectorSelectionType = 'model' | 'id'
+export type ModelSelectorMountStrategy = 'destroy' | 'lazy-keep'
 
 interface ModelSelectorCommonProps {
   trigger: ReactNode
@@ -22,7 +23,8 @@ interface ModelSelectorCommonProps {
   align?: ModelSelectorAlign
   sideOffset?: number
   contentClassName?: string
-  listVisibleCount?: number
+  portalContainer?: HTMLElement | null
+  mountStrategy?: ModelSelectorMountStrategy
   multiSelectMode?: boolean
   defaultMultiSelectMode?: boolean
   onMultiSelectModeChange?: (enabled: boolean) => void
@@ -73,6 +75,7 @@ export interface ModelSelectorGroupItem {
   groupKind: 'pinned' | 'provider'
   provider?: Provider
   canNavigateToSettings?: boolean
+  settingsProviderId?: string
 }
 
 export interface ModelSelectorModelItem {
@@ -83,7 +86,6 @@ export interface ModelSelectorModelItem {
   modelId: UniqueModelId
   modelIdentifier: string
   isPinned: boolean
-  isSelected: boolean
   showIdentifier: boolean
 }
 
@@ -106,7 +108,9 @@ export interface UseModelSelectorDataResult {
   listItems: FlatListItem[]
   modelItems: ModelSelectorModelItem[]
   pinnedIds: readonly UniqueModelId[]
+  refetchModels: () => Promise<unknown>
   refetchPinnedModels: () => Promise<unknown>
+  refetchProviders: () => Promise<unknown>
   resetTags: () => void
   resolvedSelectedModelIds: UniqueModelId[]
   selectableModelsById: ReadonlyMap<UniqueModelId, Model>
@@ -115,4 +119,5 @@ export interface UseModelSelectorDataResult {
   tagSelection: Record<ModelSelectorTag, boolean>
   togglePin: (modelId: UniqueModelId) => Promise<void>
   toggleTag: (tag: ModelSelectorTag) => void
+  visibleSelectedModelIdSet: ReadonlySet<UniqueModelId>
 }

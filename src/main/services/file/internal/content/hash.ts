@@ -9,16 +9,16 @@
  * shared `observeExternalAccess` wrapper before re-throwing.
  */
 
-import { hash as fsHash } from '@main/utils/file/fs'
+import { hash as fsHash } from '@main/utils/file'
 import type { FileEntryId } from '@shared/data/types/file'
-import type { FilePath } from '@shared/file/types'
+import type { FilePath } from '@shared/types/file'
 
 import { resolvePhysicalPath } from '../../utils/pathResolver'
 import type { FileManagerDeps } from '../deps'
 import { observeExternalAccess } from '../observe'
 
 export async function hash(deps: FileManagerDeps, id: FileEntryId): Promise<string> {
-  const entry = await deps.fileEntryService.getById(id)
+  const entry = deps.fileEntryService.getById(id)
   const physicalPath = resolvePhysicalPath(entry)
   return observeExternalAccess(deps, entry, physicalPath, () => fsHash(physicalPath))
 }

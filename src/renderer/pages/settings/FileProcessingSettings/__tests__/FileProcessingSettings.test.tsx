@@ -1,16 +1,16 @@
 import type * as CherryStudioUi from '@cherrystudio/ui'
-import type * as RendererConstantModule from '@renderer/config/constant'
+import type * as RendererConstantModule from '@renderer/utils/platform'
 import { mockRendererLoggerService } from '@test-mocks/RendererLoggerService'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import FileProcessingSettings from '..'
 import { PADDLEOCR_DEPLOYMENT_URL } from '../components/PaddleOcrDeploymentInfo'
+import FileProcessingSettings from '../FileProcessingSettings'
 
 const setPreferencesMock = vi.hoisted(() => vi.fn())
 const setOverridesMock = vi.hoisted(() => vi.fn())
-const listAvailableProcessorsMock = vi.hoisted(() => vi.fn())
+const ipcRequestMock = vi.hoisted(() => vi.fn())
 const topViewShowMock = vi.hoisted(() => vi.fn())
 const topViewHideMock = vi.hoisted(() => vi.fn())
 const comboboxMockState = vi.hoisted(() => ({
@@ -38,11 +38,17 @@ vi.mock('react-i18next', () => ({
   })
 }))
 
-vi.mock('@renderer/context/ThemeProvider', () => ({
+vi.mock('@renderer/hooks/useTheme', () => ({
   useTheme: () => ({ theme: 'light' })
 }))
 
-vi.mock('@renderer/config/constant', async (importOriginal) => {
+vi.mock('@renderer/ipc', () => ({
+  ipcApi: {
+    request: ipcRequestMock
+  }
+}))
+
+vi.mock('@renderer/utils/platform', async (importOriginal) => {
   const actual = await importOriginal<typeof RendererConstantModule>()
 
   return {
@@ -70,7 +76,7 @@ vi.mock('@renderer/components/Scrollbar', () => ({
   default: ({ children, ...props }: React.HTMLAttributes<HTMLDivElement>) => <div {...props}>{children}</div>
 }))
 
-vi.mock('@renderer/components/TopView', () => ({
+vi.mock('@renderer/components/TopView/TopView', () => ({
   TopView: {
     show: topViewShowMock,
     hide: topViewHideMock
@@ -136,13 +142,33 @@ vi.mock('@cherrystudio/ui', async (importOriginal) => {
     },
     Dialog: ({ children, open }: React.HTMLAttributes<HTMLDivElement> & { open?: boolean }) =>
       open === false ? null : <>{children}</>,
-    DialogContent: ({ children, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
-      <div role="dialog" {...props}>
-        {children}
-      </div>
-    ),
+    DialogContent: ({
+      children,
+      closeOnOverlayClick,
+      ...props
+    }: React.HTMLAttributes<HTMLDivElement> & { closeOnOverlayClick?: boolean }) => {
+      void closeOnOverlayClick
+      return (
+        <div role="dialog" {...props}>
+          {children}
+        </div>
+      )
+    },
     DialogHeader: ({ children, ...props }: React.HTMLAttributes<HTMLDivElement>) => <div {...props}>{children}</div>,
     DialogTitle: ({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement>) => <h2 {...props}>{children}</h2>,
+    InfoTooltip: ({
+      content,
+      iconProps,
+      placement
+    }: {
+      content: React.ReactNode
+      iconProps?: { size?: number }
+      placement?: string
+    }) => (
+      <span data-testid="info-tooltip" data-icon-size={iconProps?.size} data-placement={placement}>
+        {content}
+      </span>
+    ),
     Input: (props: React.InputHTMLAttributes<HTMLInputElement>) => <input {...props} />,
     MenuDivider: (props: React.HTMLAttributes<HTMLDivElement>) => <div {...props} />,
     MenuItem: ({
@@ -234,17 +260,9 @@ describe('FileProcessingSettings', () => {
     loggerWarnSpy = vi.spyOn(mockRendererLoggerService, 'warn').mockImplementation(() => {})
     topViewShowMock.mockReset()
     topViewHideMock.mockReset()
-    listAvailableProcessorsMock.mockReset()
-    listAvailableProcessorsMock.mockResolvedValue({
+    ipcRequestMock.mockReset()
+    ipcRequestMock.mockResolvedValue({
       processorIds: ['system', 'tesseract', 'paddleocr', 'mineru', 'doc2x', 'mistral', 'open-mineru']
-    })
-    Object.defineProperty(window, 'api', {
-      configurable: true,
-      value: {
-        fileProcessing: {
-          listAvailableProcessors: listAvailableProcessorsMock
-        }
-      }
     })
     Object.defineProperty(window, 'modal', {
       configurable: true,
@@ -272,6 +290,18 @@ describe('FileProcessingSettings', () => {
         defaultImageProcessor: 'system'
       })
     })
+  })
+
+  it('shows feature group titles so processors shared by OCR and document parsing are not ambiguous', async () => {
+    render(<FileProcessingSettings />)
+
+    expect(await screen.findByText('settings.tool.file_processing.features.image_to_text.title')).toBeInTheDocument()
+    expect(screen.getByText('settings.tool.file_processing.features.document_to_markdown.title')).toBeInTheDocument()
+    expect(screen.getByText('settings.tool.file_processing.features.image_to_text.tooltip')).toBeInTheDocument()
+    expect(screen.getByText('settings.tool.file_processing.features.document_to_markdown.tooltip')).toBeInTheDocument()
+    expect(
+      screen.getAllByRole('button', { name: /settings.tool.file_processing.processors.mistral.name/ })
+    ).toHaveLength(2)
   })
 
   it('shows the provider detail header with a default badge and hides the default button', async () => {
@@ -309,7 +339,7 @@ describe('FileProcessingSettings', () => {
       screen.queryByRole('button', { name: /settings.tool.file_processing.processors.ovocr.name/ })
     ).not.toBeInTheDocument()
 
-    listAvailableProcessorsMock.mockResolvedValueOnce({
+    ipcRequestMock.mockResolvedValueOnce({
       processorIds: ['system', 'tesseract', 'paddleocr', 'mineru', 'doc2x', 'mistral', 'open-mineru', 'ovocr']
     })
 
@@ -323,7 +353,7 @@ describe('FileProcessingSettings', () => {
   })
 
   it('keeps OV OCR hidden and logs when available processor lookup fails', async () => {
-    listAvailableProcessorsMock.mockRejectedValueOnce(new Error('IPC failed'))
+    ipcRequestMock.mockRejectedValueOnce(new Error('IPC failed'))
 
     render(<FileProcessingSettings />)
 
@@ -486,6 +516,34 @@ describe('FileProcessingSettings', () => {
     )
   })
 
+  it('reopens the file processing API key list with keys saved from the popup', async () => {
+    render(<FileProcessingSettings />)
+
+    fireEvent.click(
+      (await screen.findAllByRole('button', { name: /settings.tool.file_processing.processors.mistral.name/ }))[0]
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'settings.provider.api.key.list.open' }))
+
+    await waitFor(() => {
+      expect(topViewShowMock).toHaveBeenCalledTimes(1)
+    })
+
+    await act(async () => {
+      await topViewShowMock.mock.calls[0][0].props.onSetApiKeys('mistral', ['key,1', 'key2'])
+    })
+
+    expect(screen.getByPlaceholderText('settings.tool.file_processing.fields.api_keys_placeholder')).toHaveValue(
+      'key\\,1, key2'
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'settings.provider.api.key.list.open' }))
+
+    await waitFor(() => {
+      expect(topViewShowMock).toHaveBeenCalledTimes(2)
+    })
+    expect(topViewShowMock.mock.calls[1][0].props.apiKeys).toEqual(['key,1', 'key2'])
+  })
+
   it('stores System OCR language options on Windows', async () => {
     render(<FileProcessingSettings />)
 
@@ -510,14 +568,14 @@ describe('FileProcessingSettings', () => {
     )
 
     const apiKeyLabel = screen.getByText('settings.tool.file_processing.fields.api_key')
-    const modelSection = screen.getByText('settings.tool.file_processing.sections.model_parameters')
+    const parseModelLabel = screen.getByText('settings.tool.file_processing.processors.paddleocr.fields.parse_model')
     const deploymentDescription = screen.getByText(
       'settings.tool.file_processing.processors.paddleocr.deployment.description'
     )
 
     expect(deploymentDescription).toBeInTheDocument()
-    expect(apiKeyLabel.compareDocumentPosition(modelSection)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
-    expect(modelSection.compareDocumentPosition(deploymentDescription)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(apiKeyLabel.compareDocumentPosition(parseModelLabel)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(parseModelLabel.compareDocumentPosition(deploymentDescription)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
     expect(
       screen.getByRole('link', { name: /settings.tool.file_processing.processors.paddleocr.deployment.docs/ })
     ).toHaveAttribute('href', PADDLEOCR_DEPLOYMENT_URL)
@@ -596,6 +654,32 @@ describe('FileProcessingSettings', () => {
     expect(
       screen.getByRole('button', { name: 'settings.tool.file_processing.processors.paddleocr.fields.parse_model' })
     ).toHaveTextContent('PP-StructureV3')
+  })
+
+  it('shows only OCR-safe model options for PaddleOCR image_to_text', async () => {
+    render(<FileProcessingSettings />)
+
+    fireEvent.click(
+      (await screen.findAllByRole('button', { name: /settings.tool.file_processing.processors.paddleocr.name/ }))[0]
+    )
+
+    expect(screen.getByRole('button', { name: 'PP-OCRv6' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'PP-OCRv5' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'PaddleOCR-VL-1.5' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'PP-StructureV3' })).not.toBeInTheDocument()
+  })
+
+  it('shows only document parsing model options for PaddleOCR document_to_markdown', async () => {
+    render(<FileProcessingSettings />)
+
+    fireEvent.click(
+      (await screen.findAllByRole('button', { name: /settings.tool.file_processing.processors.paddleocr.name/ }))[1]
+    )
+
+    expect(screen.getByRole('button', { name: 'PaddleOCR-VL-1.5' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'PaddleOCR-VL' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'PP-StructureV3' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'PP-OCRv6' })).not.toBeInTheDocument()
   })
 
   it('manages Tesseract language packs with the settings combobox', async () => {

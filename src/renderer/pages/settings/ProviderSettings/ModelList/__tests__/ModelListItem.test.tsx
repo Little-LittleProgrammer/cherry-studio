@@ -1,3 +1,4 @@
+import { DataApiErrorFactory } from '@shared/data/api/errors'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -30,8 +31,14 @@ vi.mock('@cherrystudio/ui', async (importOriginal) => {
     Avatar: ({ children }: any) => <span>{children}</span>,
     AvatarFallback: ({ children }: any) => <span>{children}</span>,
     RowFlex: ({ children, ...props }: any) => <div {...props}>{children}</div>,
-    Switch: ({ checked, onCheckedChange, ...props }: any) => (
-      <button type="button" role="switch" aria-checked={checked} onClick={() => onCheckedChange(!checked)} {...props}>
+    Switch: ({ checked, onCheckedChange, size, ...props }: any) => (
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        data-size={size}
+        onClick={() => onCheckedChange(!checked)}
+        {...props}>
         {String(checked)}
       </button>
     ),
@@ -39,7 +46,7 @@ vi.mock('@cherrystudio/ui', async (importOriginal) => {
   }
 })
 
-vi.mock('@renderer/config/models', async (importOriginal) => ({
+vi.mock('@renderer/utils/model', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   getModelLogo: () => null
 }))
@@ -81,6 +88,7 @@ describe('ModelListItem', () => {
           } as any
         }
         onEdit={vi.fn()}
+        onDelete={vi.fn()}
         onToggleEnabled={onToggleEnabled}
       />
     )
@@ -93,7 +101,63 @@ describe('ModelListItem', () => {
     })
   })
 
-  it('opens the model drawer from the model name and only copies from the copy button', async () => {
+  it('uses the smallest switch size for the model row action', () => {
+    render(
+      <ModelListItem
+        model={
+          {
+            id: 'openai::alpha',
+            providerId: 'openai',
+            name: 'Alpha',
+            isEnabled: true,
+            capabilities: []
+          } as any
+        }
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onToggleEnabled={vi.fn()}
+      />
+    )
+
+    expect(screen.getByRole('switch')).toHaveAttribute('data-size', 'xs')
+  })
+
+  it('opens the model drawer from the model name and settings button', async () => {
+    const onEdit = vi.fn()
+    const onDelete = vi.fn()
+
+    render(
+      <ModelListItem
+        model={
+          {
+            id: 'openai::alpha',
+            providerId: 'openai',
+            name: 'Alpha',
+            isEnabled: true,
+            capabilities: []
+          } as any
+        }
+        onEdit={onEdit}
+        onDelete={onDelete}
+        onToggleEnabled={vi.fn()}
+      />
+    )
+
+    fireEvent.click(screen.getByText('Alpha'))
+
+    expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'openai::alpha' }))
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled()
+
+    onEdit.mockClear()
+    fireEvent.click(screen.getByLabelText('common.settings'))
+
+    expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'openai::alpha' }))
+    expect(onDelete).not.toHaveBeenCalled()
+    expect(navigator.clipboard.writeText).not.toHaveBeenCalled()
+  })
+
+  it('deletes the model from the row delete button without opening edit', () => {
+    const onDelete = vi.fn().mockResolvedValue(undefined)
     const onEdit = vi.fn()
 
     render(
@@ -108,19 +172,73 @@ describe('ModelListItem', () => {
           } as any
         }
         onEdit={onEdit}
+        onDelete={onDelete}
         onToggleEnabled={vi.fn()}
       />
     )
 
-    fireEvent.click(screen.getByText('Alpha'))
+    fireEvent.click(screen.getByLabelText('settings.models.manage.remove_model'))
 
-    expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: 'openai::alpha' }))
-    expect(navigator.clipboard.writeText).not.toHaveBeenCalled()
-
-    onEdit.mockClear()
-    fireEvent.click(screen.getByLabelText('settings.models.copy_model_id_tooltip'))
-
-    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('alpha')
+    expect(onDelete).toHaveBeenCalledWith(expect.objectContaining({ id: 'openai::alpha' }))
     expect(onEdit).not.toHaveBeenCalled()
+  })
+
+  it('shows an error toast when deleting a model fails', async () => {
+    const onDelete = vi.fn().mockRejectedValue(new Error('delete failed'))
+
+    render(
+      <ModelListItem
+        model={
+          {
+            id: 'openai::alpha',
+            providerId: 'openai',
+            name: 'Alpha',
+            isEnabled: true,
+            capabilities: []
+          } as any
+        }
+        onEdit={vi.fn()}
+        onDelete={onDelete}
+        onToggleEnabled={vi.fn()}
+      />
+    )
+
+    fireEvent.click(screen.getByLabelText('settings.models.manage.remove_model'))
+
+    expect(onDelete).toHaveBeenCalledWith(expect.objectContaining({ id: 'openai::alpha' }))
+    await waitFor(() => {
+      expect(window.toast.error).toHaveBeenCalledWith('settings.models.manage.operation_failed')
+    })
+  })
+
+  it('shows a localized knowledge base in-use message when deleting a model fails', async () => {
+    const error = DataApiErrorFactory.invalidOperation(
+      'delete model openai/alpha',
+      'model is in use by a knowledge base'
+    )
+    const onDelete = vi.fn().mockRejectedValue(error)
+
+    render(
+      <ModelListItem
+        model={
+          {
+            id: 'openai::alpha',
+            providerId: 'openai',
+            name: 'Alpha',
+            isEnabled: true,
+            capabilities: []
+          } as any
+        }
+        onEdit={vi.fn()}
+        onDelete={onDelete}
+        onToggleEnabled={vi.fn()}
+      />
+    )
+
+    fireEvent.click(screen.getByLabelText('settings.models.manage.remove_model'))
+
+    await waitFor(() => {
+      expect(window.toast.error).toHaveBeenCalledWith('settings.models.manage.model_in_use_by_knowledge_base')
+    })
   })
 })

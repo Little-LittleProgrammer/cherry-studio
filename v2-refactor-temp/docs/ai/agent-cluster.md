@@ -42,7 +42,7 @@ injection (see Steering below).
 
 ### Hooks model
 
-`AgentLoopHooks` (in `loop/index.ts`) defines six keys:
+`AgentLoopHooks` (in `loop/types.ts`) defines six keys:
 
 ```
 onStart, prepareStep, onStepFinish, onToolExecutionStart, onToolExecutionEnd,
@@ -70,7 +70,7 @@ Observer hooks (`agent.on(key, fn)`) compose into the same pass via
 AI SDK v6's `ToolLoopAgentSettings` doesn't expose tool-level callbacks
 (`onStepFinish` fires per LLM step, not per tool, and lacks
 `durationMs`). The agent loop wraps each tool's `execute` with a small
-shim (`wrapToolsWithExecutionHooks` in `loop/internal.ts`) that:
+shim (`wrapToolsWithExecutionHooks` in `loop/hookRunner.ts`) that:
 
 - emits `onToolExecutionStart` with `{ callId, toolName, input, messages }`
 - captures `durationMs` (excluding hook latency)
@@ -78,7 +78,7 @@ shim (`wrapToolsWithExecutionHooks` in `loop/internal.ts`) that:
 
 The shape mirrors AI SDK v7's
 `experimental_onToolExecutionStart/End`. When v7 lands the shim removes
-and hook signatures stay stable. Cited in `loop/index.ts`:27.
+and hook signatures stay stable. Cited in `loop/types.ts`:27.
 
 ### Steering (abort + restart)
 
@@ -87,9 +87,10 @@ single AI SDK pass; a follow-up never folds into the running turn (that
 mutated in-flight history and had no clean turn boundary). Steering is
 handled one level up by `AiStreamManager`:
 
-- **chat** — a resubmit to a live topic is aborted-and-restarted via
-  `AiStreamManager.abortAndAwait(topicId)` (await the executions settling
-  as `paused`, evict, then start a fresh turn).
+- **chat** — a resubmit to a live topic is enqueued via
+  `AiStreamManager.enqueuePendingSteer(topicId, userMessageId)`; the running turn
+  yields at its next step boundary (the `hasPendingSteer` stop condition) and
+  `onExecutionDone` chains a fresh continuation turn carrying the queued message.
 - **agent session** — the follow-up is enqueued on the session's
   `pendingTurns` and the turn is interrupted between tool calls.
 

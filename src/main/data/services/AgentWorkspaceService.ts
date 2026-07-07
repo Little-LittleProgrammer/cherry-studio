@@ -4,204 +4,228 @@ import { defaultHandlersFor, withSqliteErrors } from '@data/db/sqliteErrors'
 import type { DbOrTx } from '@data/db/types'
 import { applyMoves, insertWithOrderKey } from '@data/services/utils/orderKey'
 import { timestampToISO } from '@data/services/utils/rowMappers'
-import { loggerService } from '@logger'
-import { DataApiErrorFactory } from '@shared/data/api'
+import { normalizeWorkspacePath } from '@main/utils/agentWorkspacePath'
+import { DataApiErrorFactory } from '@shared/data/api/errors'
 import type { OrderRequest } from '@shared/data/api/schemas/_endpointHelpers'
-import type { AgentWorkspaceEntity } from '@shared/data/api/schemas/agentWorkspaces'
-import { asc, eq } from 'drizzle-orm'
-import fs from 'fs'
+import {
+  AGENT_WORKSPACE_TYPE,
+  type AgentWorkspaceEntity,
+  AgentWorkspaceTypeSchema,
+  type UpdateAgentWorkspaceDto
+} from '@shared/data/api/schemas/agentWorkspaces'
+import { and, asc, eq } from 'drizzle-orm'
 import path from 'path'
 import { v4 as uuidv4 } from 'uuid'
 
-const logger = loggerService.withContext('AgentWorkspaceService')
+type AgentWorkspaceLookupOptions = { includeSystem?: boolean }
+export type FindOrCreateAgentWorkspaceResult = { workspace: AgentWorkspaceEntity; created: boolean }
 
-export function rowToWorkspace(row: AgentWorkspaceRow): AgentWorkspaceEntity {
+export function rowToAgentWorkspace(row: AgentWorkspaceRow): AgentWorkspaceEntity {
   return {
     id: row.id,
     name: row.name,
     path: row.path,
+    type: AgentWorkspaceTypeSchema.parse(row.type),
     orderKey: row.orderKey,
     createdAt: timestampToISO(row.createdAt),
     updatedAt: timestampToISO(row.updatedAt)
   }
 }
 
-function normalizeWorkspacePath(rawPath: string): string {
-  const trimmed = rawPath.trim()
-  if (!trimmed) {
-    throw DataApiErrorFactory.validation({ path: ['Workspace path is required'] })
-  }
-  if (!path.isAbsolute(trimmed)) {
-    throw DataApiErrorFactory.validation({ path: ['Workspace path must be absolute'] })
-  }
-  return path.normalize(trimmed)
-}
-
 function defaultWorkspaceName(workspacePath: string): string {
   return path.basename(workspacePath) || workspacePath
 }
 
-function ensureWorkspaceDirectory(workspacePath: string): void {
-  if (fs.existsSync(workspacePath)) {
-    const stats = fs.statSync(workspacePath)
-    if (!stats.isDirectory()) {
-      throw DataApiErrorFactory.validation({ path: ['Workspace path must be a directory'] })
-    }
-    return
+function normalizeWorkspaceName(rawName: string): string {
+  const trimmed = rawName.trim()
+  if (!trimmed) {
+    throw DataApiErrorFactory.validation({ name: ['Workspace name is required'] })
   }
-
-  try {
-    fs.mkdirSync(workspacePath, { recursive: true })
-  } catch (error) {
-    logger.error('Failed to create workspace directory', {
-      path: workspacePath,
-      error: error instanceof Error ? error.message : String(error)
-    })
-    throw error
-  }
-}
-
-function cleanupPreparedWorkspaceDirectory(workspacePath: string): void {
-  try {
-    fs.rmdirSync(workspacePath)
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code
-    if (code === 'ENOENT') return
-    logger.warn('Failed to clean up prepared workspace directory', {
-      path: workspacePath,
-      error: error instanceof Error ? error.message : String(error)
-    })
-  }
+  return trimmed
 }
 
 export class AgentWorkspaceService {
-  async list(): Promise<AgentWorkspaceEntity[]> {
+  list(options: AgentWorkspaceLookupOptions = {}): AgentWorkspaceEntity[] {
     const db = application.get('DbService').getDb()
-    const rows = await db
+    const rows = db
       .select()
       .from(agentWorkspaceTable)
+      .where(options.includeSystem ? undefined : eq(agentWorkspaceTable.type, AGENT_WORKSPACE_TYPE.USER))
       .orderBy(asc(agentWorkspaceTable.orderKey), asc(agentWorkspaceTable.id))
-    return rows.map(rowToWorkspace)
+      .all()
+    return rows.map(rowToAgentWorkspace)
   }
 
-  async getById(id: string): Promise<AgentWorkspaceEntity> {
+  getById(id: string, options: AgentWorkspaceLookupOptions = {}): AgentWorkspaceEntity {
     const db = application.get('DbService').getDb()
-    const row = await this.getRowByIdTx(db, id)
-    return rowToWorkspace(row)
+    const row = this.getRowByIdTx(db, id, options)
+    return rowToAgentWorkspace(row)
   }
 
-  async getByIdTx(tx: DbOrTx, id: string): Promise<AgentWorkspaceEntity> {
-    const row = await this.getRowByIdTx(tx, id)
-    return rowToWorkspace(row)
+  getByIdTx(tx: DbOrTx, id: string, options: AgentWorkspaceLookupOptions = {}): AgentWorkspaceEntity {
+    const row = this.getRowByIdTx(tx, id, options)
+    return rowToAgentWorkspace(row)
   }
 
-  async getRowByIdTx(tx: DbOrTx, id: string): Promise<AgentWorkspaceRow> {
-    const [row] = await tx.select().from(agentWorkspaceTable).where(eq(agentWorkspaceTable.id, id)).limit(1)
+  getRowByIdTx(tx: DbOrTx, id: string, options: AgentWorkspaceLookupOptions = {}): AgentWorkspaceRow {
+    const predicate = options.includeSystem
+      ? eq(agentWorkspaceTable.id, id)
+      : and(eq(agentWorkspaceTable.id, id), eq(agentWorkspaceTable.type, AGENT_WORKSPACE_TYPE.USER))
+    const [row] = tx.select().from(agentWorkspaceTable).where(predicate).limit(1).all()
     if (!row) throw DataApiErrorFactory.notFound('Workspace', id)
     return row
   }
 
-  async findOrCreateByPath(rawPath: string, options: { name?: string } = {}): Promise<AgentWorkspaceEntity> {
+  findOrCreateByPath(rawPath: string, options: { name?: string } = {}): AgentWorkspaceEntity {
+    return this.findOrCreateByPathResult(rawPath, options).workspace
+  }
+
+  findOrCreateByPathResult(rawPath: string, options: { name?: string } = {}): FindOrCreateAgentWorkspaceResult {
     const workspacePath = normalizeWorkspacePath(rawPath)
-    ensureWorkspaceDirectory(workspacePath)
-    return await this.findOrCreatePreparedPath(workspacePath, options)
-  }
-
-  async findOrCreateByPathTx(
-    tx: DbOrTx,
-    rawPath: string,
-    options: { name?: string } = {}
-  ): Promise<AgentWorkspaceEntity> {
-    const workspacePath = normalizeWorkspacePath(rawPath)
-    const row = await withSqliteErrors(() => this.findOrCreateRowByNormalizedPathTx(tx, workspacePath, options), {
-      ...defaultHandlersFor('Workspace', workspacePath),
-      unique: () => DataApiErrorFactory.conflict(`Workspace path '${workspacePath}' already exists`, 'Workspace')
-    })
-    return rowToWorkspace(row)
-  }
-
-  prepareDefaultWorkspaceDirectory(): string {
-    const workspacePath = path.join(application.getPath('feature.agents.workspaces'), uuidv4())
-    ensureWorkspaceDirectory(workspacePath)
-    return workspacePath
-  }
-
-  cleanupPreparedWorkspaceDirectory(workspacePath: string): void {
-    cleanupPreparedWorkspaceDirectory(workspacePath)
-  }
-
-  async createDefaultWorkspace(): Promise<AgentWorkspaceEntity> {
-    const workspacePath = this.prepareDefaultWorkspaceDirectory()
-    try {
-      return await this.findOrCreatePreparedPath(workspacePath)
-    } catch (error) {
-      cleanupPreparedWorkspaceDirectory(workspacePath)
-      throw error
-    }
-  }
-
-  async createDefaultWorkspaceTx(tx: DbOrTx, workspacePath: string): Promise<AgentWorkspaceEntity> {
-    return await this.findOrCreateByPathTx(tx, workspacePath)
-  }
-
-  private async findOrCreatePreparedPath(
-    workspacePath: string,
-    options: { name?: string } = {}
-  ): Promise<AgentWorkspaceEntity> {
-    const dbService = application.get('DbService')
-    const row = await withSqliteErrors(
-      () => dbService.withWriteTx((tx) => this.findOrCreateRowByNormalizedPathTx(tx, workspacePath, options)),
+    const result = withSqliteErrors(
+      () =>
+        application
+          .get('DbService')
+          .withWriteTx((tx) => this.findOrCreateRowByNormalizedPathTx(tx, workspacePath, options)),
       {
         ...defaultHandlersFor('Workspace', workspacePath),
         unique: () => DataApiErrorFactory.conflict(`Workspace path '${workspacePath}' already exists`, 'Workspace')
       }
     )
-
-    return rowToWorkspace(row)
+    return { workspace: rowToAgentWorkspace(result.row), created: result.created }
   }
 
-  private async findOrCreateRowByNormalizedPathTx(
+  findOrCreateByPathTx(tx: DbOrTx, rawPath: string, options: { name?: string } = {}): AgentWorkspaceEntity {
+    const workspacePath = normalizeWorkspacePath(rawPath)
+    const result = withSqliteErrors(() => this.findOrCreateRowByNormalizedPathTx(tx, workspacePath, options), {
+      ...defaultHandlersFor('Workspace', workspacePath),
+      unique: () => DataApiErrorFactory.conflict(`Workspace path '${workspacePath}' already exists`, 'Workspace')
+    })
+    return rowToAgentWorkspace(result.row)
+  }
+
+  private findOrCreateRowByNormalizedPathTx(
     tx: DbOrTx,
     workspacePath: string,
     options: { name?: string } = {}
-  ): Promise<AgentWorkspaceRow> {
-    const [existing] = await tx
+  ): { row: AgentWorkspaceRow; created: boolean } {
+    const [existing] = tx
       .select()
       .from(agentWorkspaceTable)
       .where(eq(agentWorkspaceTable.path, workspacePath))
       .limit(1)
-    if (existing) return existing
+      .all()
+    if (existing) {
+      // Idempotent find branch: POST/find-or-create never renames an existing workspace.
+      // Callers that want to rename must use PATCH /agent-workspaces/:workspaceId.
+      if (AgentWorkspaceTypeSchema.parse(existing.type) === AGENT_WORKSPACE_TYPE.USER) {
+        return { row: existing, created: false }
+      }
+      throw DataApiErrorFactory.conflict(`Workspace path '${workspacePath}' already exists`, 'Workspace')
+    }
 
     const id = uuidv4()
     const name = options.name?.trim() || defaultWorkspaceName(workspacePath)
-    return (await insertWithOrderKey(
+    const row = insertWithOrderKey(
       tx,
       agentWorkspaceTable,
-      { id, name, path: workspacePath },
+      { id, name, path: workspacePath, type: AGENT_WORKSPACE_TYPE.USER },
       { pkColumn: agentWorkspaceTable.id, position: 'first' }
-    )) as AgentWorkspaceRow
+    ) as AgentWorkspaceRow
+    return { row, created: true }
   }
 
-  async reorder(id: string, anchor: OrderRequest): Promise<void> {
-    await application.get('DbService').withWriteTx((tx) => this.reorderTx(tx, id, anchor))
+  createSystemWorkspaceForSessionTx(tx: DbOrTx, input: { sessionId: string }): AgentWorkspaceEntity {
+    const workspacePath = normalizeWorkspacePath(
+      path.join(application.getPath('feature.agents.workspaces'), input.sessionId)
+    )
+    const row = withSqliteErrors(
+      () =>
+        insertWithOrderKey(
+          tx,
+          agentWorkspaceTable,
+          {
+            id: uuidv4(),
+            name: defaultWorkspaceName(workspacePath),
+            path: workspacePath,
+            type: AGENT_WORKSPACE_TYPE.SYSTEM
+          },
+          { pkColumn: agentWorkspaceTable.id, position: 'first' }
+        ) as AgentWorkspaceRow,
+      {
+        ...defaultHandlersFor('Workspace', workspacePath),
+        unique: () =>
+          DataApiErrorFactory.conflict(`System workspace already exists for session ${input.sessionId}`, 'Workspace')
+      }
+    )
+    return rowToAgentWorkspace(row)
   }
 
-  async reorderTx(tx: DbOrTx, id: string, anchor: OrderRequest): Promise<void> {
-    const [target] = await tx
+  update(id: string, dto: UpdateAgentWorkspaceDto): AgentWorkspaceEntity {
+    const row = withSqliteErrors(
+      () =>
+        application.get('DbService').withWriteTx((tx) => {
+          this.getRowByIdTx(tx, id)
+          const [updated] = tx
+            .update(agentWorkspaceTable)
+            .set({ name: normalizeWorkspaceName(dto.name) })
+            .where(and(eq(agentWorkspaceTable.id, id), eq(agentWorkspaceTable.type, AGENT_WORKSPACE_TYPE.USER)))
+            .returning()
+            .all()
+          return updated
+        }),
+      defaultHandlersFor('Workspace', id)
+    )
+    if (!row) throw DataApiErrorFactory.notFound('Workspace', id)
+    return rowToAgentWorkspace(row)
+  }
+
+  deleteByIdTx(tx: DbOrTx, id: string): void {
+    const [row] = tx
+      .delete(agentWorkspaceTable)
+      .where(eq(agentWorkspaceTable.id, id))
+      .returning({ id: agentWorkspaceTable.id })
+      .all()
+    if (!row) throw DataApiErrorFactory.notFound('Workspace', id)
+  }
+
+  reorder(id: string, anchor: OrderRequest): void {
+    application.get('DbService').withWriteTx((tx) => this.reorderTx(tx, id, anchor))
+  }
+
+  reorderTx(tx: DbOrTx, id: string, anchor: OrderRequest): void {
+    this.assertUserWorkspaceExistsTx(tx, id)
+    this.assertUserAnchorExistsTx(tx, anchor)
+    applyMoves(tx, agentWorkspaceTable, [{ id, anchor }], { pkColumn: agentWorkspaceTable.id })
+  }
+
+  reorderBatch(moves: Array<{ id: string; anchor: OrderRequest }>): void {
+    if (moves.length === 0) return
+    application.get('DbService').withWriteTx((tx) => this.reorderBatchTx(tx, moves))
+  }
+
+  reorderBatchTx(tx: DbOrTx, moves: Array<{ id: string; anchor: OrderRequest }>): void {
+    for (const move of moves) {
+      this.assertUserWorkspaceExistsTx(tx, move.id)
+      this.assertUserAnchorExistsTx(tx, move.anchor)
+    }
+    applyMoves(tx, agentWorkspaceTable, moves, { pkColumn: agentWorkspaceTable.id })
+  }
+
+  private assertUserWorkspaceExistsTx(tx: DbOrTx, id: string): void {
+    const [target] = tx
       .select({ id: agentWorkspaceTable.id })
       .from(agentWorkspaceTable)
-      .where(eq(agentWorkspaceTable.id, id))
+      .where(and(eq(agentWorkspaceTable.id, id), eq(agentWorkspaceTable.type, AGENT_WORKSPACE_TYPE.USER)))
+      .limit(1)
+      .all()
     if (!target) throw DataApiErrorFactory.notFound('Workspace', id)
-    await applyMoves(tx, agentWorkspaceTable, [{ id, anchor }], { pkColumn: agentWorkspaceTable.id })
   }
 
-  async reorderBatch(moves: Array<{ id: string; anchor: OrderRequest }>): Promise<void> {
-    if (moves.length === 0) return
-    await application.get('DbService').withWriteTx((tx) => this.reorderBatchTx(tx, moves))
-  }
-
-  async reorderBatchTx(tx: DbOrTx, moves: Array<{ id: string; anchor: OrderRequest }>): Promise<void> {
-    await applyMoves(tx, agentWorkspaceTable, moves, { pkColumn: agentWorkspaceTable.id })
+  private assertUserAnchorExistsTx(tx: DbOrTx, anchor: OrderRequest): void {
+    const anchorId = 'before' in anchor ? anchor.before : 'after' in anchor ? anchor.after : undefined
+    if (!anchorId) return
+    this.assertUserWorkspaceExistsTx(tx, anchorId)
   }
 }
 

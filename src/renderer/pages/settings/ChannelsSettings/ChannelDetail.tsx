@@ -20,18 +20,21 @@ import {
 } from '@cherrystudio/ui'
 import { loggerService } from '@logger'
 import CopyButton from '@renderer/components/CopyButton'
+import { WorkspaceSelector } from '@renderer/components/resourceCatalog/selectors'
 import Scrollbar from '@renderer/components/Scrollbar'
-import { isSoulModeEnabled } from '@renderer/hooks/agents/agentConfiguration'
-import { useAgents } from '@renderer/hooks/agents/useAgent'
-import { useChannels } from '@renderer/hooks/agents/useChannels'
+import { SettingDivider, SettingsContentBody, SettingTitle } from '@renderer/components/SettingsPrimitives'
+import { useQuery } from '@renderer/data/hooks/useDataApi'
+import { useAgents } from '@renderer/hooks/agent/useAgent'
+import { useChannels } from '@renderer/hooks/agent/useChannels'
+import { isSoulModeEnabled } from '@renderer/utils/agent/agentConfiguration'
 import { getChannelTypeIcon } from '@renderer/utils/agentSession'
+import { AGENT_WORKSPACE_TYPE } from '@shared/data/api/schemas/agentWorkspaces'
 import type { AgentConfiguration } from '@shared/data/types/agent'
-import { FileText, Pencil, Plus, Trash2 } from 'lucide-react'
+import { ChevronDown, CircleSlash, FileText, Folder, Pencil, Plus, Trash2 } from 'lucide-react'
 import type { FC } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { SettingDivider, SettingsContentBody, SettingTitle } from '..'
 import { getFormForType } from './ChannelForms'
 import type { AvailableChannel, ChannelData } from './channelTypes'
 
@@ -147,7 +150,7 @@ const ChannelLogModal: FC<{
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
-      <DialogContent className="max-w-[600px]">
+      <DialogContent className="max-w-150">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <span>{`${channelName} — ${t('agent.cherryClaw.channels.logs')}`}</span>
@@ -193,11 +196,15 @@ const ChannelEditModal: FC<
   const { t } = useTranslation()
   const [name, setName] = useState('')
   const [agentId, setAgentId] = useState<string | null>(null)
+  // `null` = "No work directory" (system workspace); a string binds the channel to that user workspace.
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null)
+  const { data: workspaces } = useQuery('/agent-workspaces')
 
   useEffect(() => {
     if (channel) {
       setName(channel.name)
       setAgentId(channel.agentId ?? null)
+      setWorkspaceId(channel.workspace?.type === AGENT_WORKSPACE_TYPE.USER ? channel.workspace.workspaceId : null)
     }
   }, [channel])
 
@@ -221,6 +228,26 @@ const ChannelEditModal: FC<
     [channel, onSave]
   )
 
+  const handleWorkspaceChange = useCallback(
+    (nextWorkspaceId: string | null) => {
+      setWorkspaceId(nextWorkspaceId)
+      if (channel) {
+        onSave(channel.id, {
+          workspace:
+            nextWorkspaceId === null
+              ? { type: AGENT_WORKSPACE_TYPE.SYSTEM }
+              : { type: AGENT_WORKSPACE_TYPE.USER, workspaceId: nextWorkspaceId }
+        })
+      }
+    },
+    [channel, onSave]
+  )
+
+  const isSystemWorkspace = workspaceId === null
+  const workspaceLabel = isSystemWorkspace
+    ? t('agent.session.workspace_selector.no_project')
+    : (workspaces?.find((w) => w.id === workspaceId)?.name ?? workspaceId)
+
   const handleUpdate = useCallback(
     (updates: Partial<ChannelData>) => {
       if (channel) onSave(channel.id, updates)
@@ -232,7 +259,7 @@ const ChannelEditModal: FC<
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
-      <DialogContent className="max-w-[500px]">
+      <DialogContent closeOnOverlayClick={false} className="max-w-125">
         {channel && (
           <>
             <DialogHeader>
@@ -271,6 +298,22 @@ const ChannelEditModal: FC<
                     className="mt-2 text-xs"
                   />
                 )}
+                {/* Workspace is a secondary detail — channel sessions default to "No work directory". */}
+                <div className="mt-2 flex items-center gap-1.5 text-foreground-muted text-xs">
+                  <span>{t('agent.session.display.workdir')}</span>
+                  <WorkspaceSelector
+                    value={workspaceId}
+                    onChange={handleWorkspaceChange}
+                    align="start"
+                    trigger={
+                      <Button variant="ghost" size="sm" className="h-6 gap-1 px-1.5 text-foreground-muted">
+                        {isSystemWorkspace ? <CircleSlash className="size-3.5" /> : <Folder className="size-3.5" />}
+                        <span className="max-w-40 truncate">{workspaceLabel}</span>
+                        <ChevronDown className="size-3.5" />
+                      </Button>
+                    }
+                  />
+                </div>
               </div>
               {FormComponent && (
                 <FormComponent channel={channel} onConfigChange={handleUpdate} onRemove={() => onDelete(channel.id)} />
@@ -325,7 +368,7 @@ const ChannelInstanceRow: FC<{
   }
 
   return (
-    <div className="flex items-center gap-3 border-(--color-border) border-b-[0.5px] px-1 py-2.5 last:border-b-0">
+    <div className="flex items-center gap-3 border-border border-b-[0.5px] px-1 py-2.5 last:border-b-0">
       <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusColor}`} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 font-medium text-sm">
@@ -351,7 +394,7 @@ const ChannelInstanceRow: FC<{
         <Button
           variant="ghost"
           size="icon-sm"
-          className="hover:!text-destructive"
+          className="hover:text-destructive!"
           onClick={() => setDeleteConfirmOpen(true)}>
           <Trash2 className="size-4" />
         </Button>
@@ -398,6 +441,7 @@ const ChannelDetail: FC<ChannelDetailProps> = ({ channelDef }) => {
         name: ch.name,
         agentId: ch.agentId,
         sessionId: ch.sessionId,
+        workspace: ch.workspace,
         config: ch.config,
         isActive: ch.isActive,
         permissionMode: ch.permissionMode,
@@ -447,6 +491,7 @@ const ChannelDetail: FC<ChannelDetailProps> = ({ channelDef }) => {
     const newChannel = await createChannel({
       type: channelDef.type,
       name: existingCount > 0 ? `${channelDef.name} ${existingCount + 1}` : channelDef.name,
+      workspace: { type: AGENT_WORKSPACE_TYPE.SYSTEM },
       config: channelDef.defaultConfig,
       isActive: true
     } as never)
@@ -462,6 +507,7 @@ const ChannelDetail: FC<ChannelDetailProps> = ({ channelDef }) => {
       const apiUpdates: Record<string, unknown> = {}
       if (updates.name !== undefined) apiUpdates.name = updates.name
       if (updates.agentId !== undefined) apiUpdates.agentId = updates.agentId
+      if (updates.workspace !== undefined) apiUpdates.workspace = updates.workspace
       if (updates.config !== undefined) apiUpdates.config = updates.config
       if (updates.isActive !== undefined) apiUpdates.isActive = updates.isActive
       if (updates.permissionMode !== undefined) apiUpdates.permissionMode = updates.permissionMode
@@ -507,7 +553,7 @@ const ChannelDetail: FC<ChannelDetailProps> = ({ channelDef }) => {
               {icon && <img src={icon} className="h-5 w-5 rounded-sm object-contain" />}
               <span className="truncate">{channelDef.name}</span>
             </SettingTitle>
-            <p className="mt-1.5 mb-0 text-(--color-foreground-muted) text-xs">
+            <p className="mt-1.5 mb-0 text-foreground-muted text-xs">
               {channelDef.available ? t(channelDef.description) : t('agent.cherryClaw.channels.comingSoon')}
             </p>
           </div>

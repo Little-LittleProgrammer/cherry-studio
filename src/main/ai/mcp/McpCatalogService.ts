@@ -5,9 +5,10 @@ import { BaseService, DependsOn, Injectable, Phase, ServicePhase } from '@main/c
 import { withSpanFunc } from '@mcp-trace/trace-core'
 import type { Tool as SDKTool } from '@modelcontextprotocol/sdk/types'
 import { isMcpToolDisabledBySource } from '@shared/ai/tools/mcpSourcePolicy'
+import { buildFunctionCallToolName } from '@shared/ai/tools/mcpToolName'
 import type { SharedCacheKey } from '@shared/data/cache/cacheSchemas'
-import { buildFunctionCallToolName } from '@shared/mcp'
-import type { McpServer, McpTool } from '@types'
+import type { McpServer } from '@shared/data/types/mcpServer'
+import type { McpPrompt, McpResource, McpTool } from '@shared/types/mcp'
 import * as z from 'zod'
 
 const logger = loggerService.withContext('McpCatalogService')
@@ -90,8 +91,8 @@ export class McpCatalogService extends BaseService {
     this.prewarmCancelled = true
   }
 
-  private async getServerById(serverId: string): Promise<McpServer> {
-    return await mcpServerService.getById(serverId)
+  private getServerById(serverId: string): McpServer {
+    return mcpServerService.getById(serverId)
   }
 
   private writeToolsCache(serverId: string, tools: McpTool[]): void {
@@ -111,8 +112,13 @@ export class McpCatalogService extends BaseService {
     return application.get('McpRuntimeService')
   }
 
-  private async filterEnabledTools(server: McpServer, tools: McpTool[]): Promise<McpTool[]> {
-    const latestServer = await this.getServerById(server.id).catch(() => server)
+  private filterEnabledTools(server: McpServer, tools: McpTool[]): McpTool[] {
+    let latestServer: McpServer
+    try {
+      latestServer = this.getServerById(server.id)
+    } catch {
+      latestServer = server
+    }
     return tools.filter((tool) => !isMcpToolDisabledBySource(latestServer, tool))
   }
 
@@ -168,7 +174,7 @@ export class McpCatalogService extends BaseService {
       const tools = await withSpanFunc(`${server.name}.ListTool`, 'MCP', listFunc, [server])
       this.writeToolsCache(server.id, tools)
       this.runtimeService().setServerStatus(server.id, 'connected')
-      return options.includeDisabled ? tools : await this.filterEnabledTools(server, tools)
+      return options.includeDisabled ? tools : this.filterEnabledTools(server, tools)
     } catch (error) {
       this.writeToolsCache(server.id, [])
       this.runtimeService().setServerStatus(server.id, 'error', error)
@@ -176,20 +182,51 @@ export class McpCatalogService extends BaseService {
     }
   }
 
-  public async listTools(serverId: string, options: ListToolsOptions = {}): Promise<McpTool[]> {
-    const server = await this.getServerById(serverId)
-    return this.listToolsForServer(server, options)
+  /**
+   * Read a server's tools from the shared `mcp.tools.<serverId>` cache. This is a
+   * **cache-only** facade: it never connects to the upstream MCP server, so a dead or
+   * slow server can't block the agent/chat startup hot path that lists tools (issue
+   * #16242). Connecting + listing is owned by `refreshTools` and the background warmers
+   * (`prewarmActiveServerTools`, the `onToolListChanged` refresh, the renderer's
+   * on-demand `refreshTools`). Cold cache → `[]`; the server's tools appear on a later
+   * session once a warmer fills it (the SDK snapshots tools per session).
+   */
+  public listTools(serverId: string, options: ListToolsOptions = {}): McpTool[] {
+    const cached = application.get('CacheService').getShared(mcpToolsCacheKey(serverId)) as McpTool[] | undefined
+    // `undefined` = never warmed (distinct from a warmed-but-empty/dead server that holds `[]`).
+    // Kick a one-shot, non-blocking refresh so the next read is populated; dead servers keep
+    // their `[]` and are not re-probed here.
+    if (cached === undefined) void this.refreshTools(serverId).catch(() => {})
+    const tools = cached ?? []
+    if (options.includeDisabled || tools.length === 0) return tools
+    let server: McpServer | undefined
+    try {
+      server = this.getServerById(serverId)
+    } catch {
+      server = undefined
+    }
+    return server ? tools.filter((tool) => !isMcpToolDisabledBySource(server, tool)) : tools
+  }
+
+  // Resources and prompts are owned by McpRuntimeService (cached under `mcp:list_*` and exposed
+  // over renderer IPC); the catalog delegates so SDK-runtime consumers keep one MCP read facade.
+  public async listResources(serverId: string): Promise<McpResource[]> {
+    return this.runtimeService().listResources(serverId)
+  }
+
+  public async listPrompts(serverId: string): Promise<McpPrompt[]> {
+    return this.runtimeService().listPrompts(serverId)
   }
 
   public async refreshTools(serverId: string): Promise<void> {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     this.clearToolsCache(server)
     await this.listToolsForServer(server, { includeDisabled: true })
   }
 
   private async prewarmActiveServerTools(): Promise<void> {
     try {
-      const { items: servers } = await mcpServerService.list({ isActive: true })
+      const { items: servers } = mcpServerService.list({ isActive: true })
       for (let index = 0; index < servers.length; index += PREWARM_CONCURRENCY) {
         if (this.prewarmCancelled || this.isStopped || this.isDestroyed) return
         const batch = servers.slice(index, index + PREWARM_CONCURRENCY)

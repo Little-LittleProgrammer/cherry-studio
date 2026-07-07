@@ -1,7 +1,6 @@
 import { loggerService } from '@logger'
 import type { McpError } from '@modelcontextprotocol/sdk/types.js'
-import type { AgentServerError } from '@renderer/types'
-import { AgentServerErrorSchema } from '@renderer/types'
+import { type AgentServerError, AgentServerErrorSchema } from '@renderer/types/agent'
 import type {
   AiSdkErrorUnion,
   SerializedAiSdkError,
@@ -9,7 +8,8 @@ import type {
   SerializedAiSdkNoSuchToolError,
   SerializedError
 } from '@renderer/types/error'
-import { isSerializedAiSdkAPICallError } from '@renderer/types/error'
+import { isSerializedAiSdkApiCallError } from '@renderer/types/error'
+import { aiErrorDetail } from '@shared/ipc/errors/ai'
 import { safeSerialize } from '@shared/utils/serialize'
 import type { NoSuchToolError } from 'ai'
 import { AISDKError } from 'ai'
@@ -319,7 +319,7 @@ export function formatAiSdkError(error: SerializedAiSdkError): string {
   if (error.cause) {
     text += `${t('error.cause')}: ${error.cause}\n`
   }
-  if (isSerializedAiSdkAPICallError(error)) {
+  if (isSerializedAiSdkApiCallError(error)) {
     if (error.statusCode) {
       text += `${t('error.statusCode')}: ${error.statusCode}\n`
     }
@@ -357,6 +357,15 @@ export const formatAxiosError = (error: AxiosError) => {
  * Used specifically for health check error handling.
  */
 export function serializeHealthCheckError(error: unknown): SerializedError {
+  // The `ai.*` IpcApi routes wrap a provider failure as an IpcError carrying the
+  // full SerializedError (statusCode, responseBody, AI SDK subtype) in `data` — main
+  // already ran serializeError, and the AISDKError instance is gone across IPC. Prefer
+  // it so the connection-check popup shows real provider detail, not just `message`.
+  const aiDetail = aiErrorDetail(error)
+  if (aiDetail) {
+    return aiDetail
+  }
+
   if (AISDKError.isInstance(error)) {
     return serializeError(error)
   }

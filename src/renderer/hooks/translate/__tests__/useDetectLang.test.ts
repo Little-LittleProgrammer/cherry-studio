@@ -23,18 +23,24 @@ vi.mock('i18next', () => ({
 }))
 
 // Franc returns the iso3 code; we canonicalize per test via mockReturnValue.
-const francMock = vi.fn<(input: string) => string>()
+// Forward options so tests catch unexpected franc configuration changes.
+const francMock = vi.fn<(input: string, options?: { minLength?: number }) => string>()
 vi.mock('franc-min', () => ({
-  franc: (input: string) => francMock(input)
+  franc: (input: string, options?: { minLength?: number }) =>
+    options === undefined ? francMock(input) : francMock(input, options)
 }))
 
-// LLM goes through window.api.ai.generateText now (Main IPC). Tests can drive
-// the response per case via mockImplementation/mockResolvedValueOnce.
-const generateTextMock =
-  vi.fn<(args: { uniqueModelId: string; system?: string; prompt: string }) => Promise<{ text: string }>>()
+// LLM goes through ipcApi.request('ai.generate_text', …) now (Main IPC). Tests can
+// drive the response per case via mockImplementation/mockResolvedValueOnce.
+const { generateTextMock } = vi.hoisted(() => ({
+  generateTextMock:
+    vi.fn<(args: { uniqueModelId: string; system?: string; prompt: string }) => Promise<{ text: string }>>()
+}))
+vi.mock('@renderer/ipc', () => ({
+  ipcApi: { request: (_route: string, input: any) => generateTextMock(input) }
+}))
 vi.stubGlobal('window', {
   ...globalThis.window,
-  api: { ai: { generateText: (args: any) => generateTextMock(args) } },
   toast: { error: vi.fn() }
 })
 
@@ -68,7 +74,7 @@ describe('detectLanguageByLLM', () => {
     generateTextMock.mockResolvedValue({ text: 'en-us' })
   })
 
-  it('returns the trimmed lang code from window.api.ai.generateText', async () => {
+  it('returns the trimmed lang code from ai.generate_text', async () => {
     generateTextMock.mockResolvedValueOnce({ text: '  en-us  ' })
 
     await expect(detectLanguageByLLM('Hello', [lang('en-us'), lang('zh-cn')], TEST_MODEL)).resolves.toBe('en-us')

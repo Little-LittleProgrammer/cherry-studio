@@ -13,7 +13,7 @@ import { importChatGPTConversations } from '@renderer/services/import'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { TopView } from '../TopView'
+import { TopView } from '../TopView/TopView'
 
 const logger = loggerService.withContext('ImportPopup')
 
@@ -90,7 +90,10 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onCancel()}>
-      <DialogContent className="sm:max-w-[520px]" onPointerDownOutside={(event) => event.preventDefault()}>
+      <DialogContent
+        closeOnOverlayClick={false}
+        className="sm:max-w-[520px]"
+        onPointerDownOutside={(event) => event.preventDefault()}>
         <DialogHeader>
           <DialogTitle>{t('import.chatgpt.title')}</DialogTitle>
         </DialogHeader>

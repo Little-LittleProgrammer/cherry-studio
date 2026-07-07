@@ -8,9 +8,11 @@ import { loggerService } from '@logger'
 import { createInMemoryMcpServer } from '@main/ai/mcp/servers/factory'
 import { BaseService, DependsOn, Emitter, type Event, Injectable, Phase, ServicePhase } from '@main/core/lifecycle'
 import { WindowType } from '@main/core/window/types'
-import { makeSureDirExists, removeEnvProxy } from '@main/utils'
-import { findCommandInShellEnv, getBinaryName, getBinaryPath, isBinaryExists } from '@main/utils/process'
-import getLoginShellEnvironment from '@main/utils/shell-env'
+import { getBinaryPath, isBinaryExists } from '@main/utils/binaryResolver'
+import { findCommandInShellEnv } from '@main/utils/commandResolver'
+import { defaultAppHeaders } from '@main/utils/http'
+import { removeEnvProxy } from '@main/utils/processRunner'
+import { getShellEnv } from '@main/utils/shellEnv'
 import { TraceMethod, withSpanFunc } from '@mcp-trace/trace-core'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type { SSEClientTransportOptions } from '@modelcontextprotocol/sdk/client/sse.js'
@@ -33,33 +35,26 @@ import {
   ResourceUpdatedNotificationSchema,
   ToolListChangedNotificationSchema
 } from '@modelcontextprotocol/sdk/types.js'
-import { nanoid } from '@reduxjs/toolkit'
 import { isMcpToolDisabledBySource } from '@shared/ai/tools/mcpSourcePolicy'
-import type { McpProgressEvent } from '@shared/config/types'
-import type { McpServerLogEntry } from '@shared/config/types'
 import type { SharedCacheKey } from '@shared/data/cache/cacheSchemas'
 import type { McpRuntimeStatus } from '@shared/data/cache/cacheValueTypes'
+import type { McpServer } from '@shared/data/types/mcpServer'
 import { IpcChannel } from '@shared/IpcChannel'
-import { defaultAppHeaders } from '@shared/utils'
+import type { McpProgressEvent, McpServerLogEntry } from '@shared/types/mcp'
+import type { McpPrompt, McpResource } from '@shared/types/mcp'
+import { BuiltinMcpServerNames, isBuiltinMcpServer } from '@shared/utils/mcp'
 import { safeSerialize } from '@shared/utils/serialize'
-import {
-  BuiltinMcpServerNames,
-  type GetResourceResponse,
-  isBuiltinMcpServer,
-  type McpCallToolResponse,
-  type McpPrompt,
-  type McpResource,
-  type McpServer
-} from '@types'
 import { app, net } from 'electron'
 import { EventEmitter } from 'events'
+import { nanoid } from 'nanoid'
 import { v4 as uuidv4 } from 'uuid'
 import * as z from 'zod'
 
-import type { DxtService } from './DxtService'
+import type { McpPackageService } from './McpPackageService'
 import { CallBackServer } from './oauth/callback'
 import { McpOAuthClientProvider } from './oauth/provider'
 import { ServerLogBuffer } from './ServerLogBuffer'
+import type { GetResourceResponse, McpCallToolResponse } from './types'
 
 // Generic type for caching wrapped functions
 type CachedFunction<T extends unknown[], R> = (...args: T) => Promise<R>
@@ -77,11 +72,6 @@ export const McpCallToolPayloadSchema = z.object({
   name: z.string().min(1),
   args: z.unknown().optional(),
   callId: z.string().optional()
-})
-export const McpGetPromptPayloadSchema = z.object({
-  serverId: z.string().min(1),
-  name: z.string().min(1),
-  args: z.record(z.string(), z.unknown()).optional()
 })
 export const McpGetResourcePayloadSchema = z.object({
   serverId: z.string().min(1),
@@ -183,7 +173,7 @@ function withCache<T extends unknown[], R>(
 
 @Injectable('McpRuntimeService')
 @ServicePhase(Phase.WhenReady)
-@DependsOn(['WindowManager', 'DxtService'])
+@DependsOn(['WindowManager', 'McpPackageService'])
 export class McpRuntimeService extends BaseService {
   private clients: Map<string, Client> = new Map()
   private pendingClients: Map<string, Promise<Client>> = new Map()
@@ -193,8 +183,8 @@ export class McpRuntimeService extends BaseService {
   private readonly _onToolListChanged = new Emitter<McpToolListChangedEvent>()
   readonly onToolListChanged: Event<McpToolListChangedEvent> = this._onToolListChanged.event
 
-  private get dxtService(): DxtService {
-    return application.get('DxtService')
+  private get mcpPackageService(): McpPackageService {
+    return application.get('McpPackageService')
   }
 
   protected async onInit(): Promise<void> {
@@ -219,16 +209,10 @@ export class McpRuntimeService extends BaseService {
     this.ipcHandle(IpcChannel.Mcp_RefreshTools, async (_e, serverId: string) => {
       await application.get('McpCatalogService').refreshTools(serverId)
     })
-    this.ipcHandle(IpcChannel.Mcp_CallTool, (_e, args) =>
-      this.callTool(McpCallToolPayloadSchema.parse(args) as CallToolArgs)
-    )
     this.ipcHandle(IpcChannel.Mcp_ListPrompts, (_e, serverId) => this.listPrompts(NonEmptyStringSchema.parse(serverId)))
-    this.ipcHandle(IpcChannel.Mcp_GetPrompt, (_e, args) => this.getPrompt(McpGetPromptPayloadSchema.parse(args)))
     this.ipcHandle(IpcChannel.Mcp_ListResources, (_e, serverId) =>
       this.listResources(NonEmptyStringSchema.parse(serverId))
     )
-    this.ipcHandle(IpcChannel.Mcp_GetResource, (_e, args) => this.getResource(McpGetResourcePayloadSchema.parse(args)))
-    this.ipcHandle(IpcChannel.Mcp_GetInstallInfo, () => this.getInstallInfo())
     this.ipcHandle(IpcChannel.Mcp_CheckConnectivity, (_e, serverId) =>
       this.checkMcpConnectivity(NonEmptyStringSchema.parse(serverId))
     )
@@ -241,8 +225,8 @@ export class McpRuntimeService extends BaseService {
     )
   }
 
-  private async getServerById(serverId: string): Promise<McpServer> {
-    return await mcpServerService.getById(serverId)
+  private getServerById(serverId: string): McpServer {
+    return mcpServerService.getById(serverId)
   }
 
   public setServerStatus(serverId: string, state: McpRuntimeState, error?: unknown): void {
@@ -281,7 +265,7 @@ export class McpRuntimeService extends BaseService {
     const serverId = parts[0]
     const toolName = parts.slice(1).join('__')
 
-    const server = await mcpServerService.getById(serverId)
+    const server = mcpServerService.getById(serverId)
 
     logger.debug(`[callToolById] Calling tool ${toolName} on server ${server.name}`)
 
@@ -322,7 +306,7 @@ export class McpRuntimeService extends BaseService {
   }
 
   public async getServerLogs(serverId: string): Promise<McpServerLogEntry[]> {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     return this.serverLogs.get(this.getServerKey(server))
   }
 
@@ -330,7 +314,7 @@ export class McpRuntimeService extends BaseService {
     serverId: string,
     operation: (client: Client, server: McpServer) => Promise<T>
   ): Promise<T> {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     const client = await this.getOrCreateClient(server)
     return operation(client, server)
   }
@@ -483,6 +467,7 @@ export class McpRuntimeService extends BaseService {
             }
           } else if (server.command) {
             let cmd = server.command
+            let effectiveCommand = server.command
 
             // Build a local env for the transport instead of mutating `server.env`. getServerKey(server)
             // serializes server.env, so mutating it here would shift the key after connect — connect-time
@@ -492,27 +477,28 @@ export class McpRuntimeService extends BaseService {
             const connectEnv: Record<string, string> = { ...server.env }
 
             // Get login shell environment first - needed for command detection and server execution
-            // Note: getLoginShellEnvironment() is memoized, so subsequent calls are fast
-            const loginShellEnv = await getLoginShellEnvironment()
+            // Note: getShellEnv() is memoized, so subsequent calls are fast
+            const loginShellEnv = await getShellEnv()
 
-            // For DXT servers, use resolved configuration with platform overrides and variable substitution
+            // For package servers, use resolved configuration with platform overrides and variable substitution
             if (server.dxtPath) {
-              const resolvedConfig = this.dxtService.getResolvedMcpConfig(server.dxtPath)
+              const resolvedConfig = this.mcpPackageService.getResolvedMcpConfig(server.dxtPath)
               if (resolvedConfig) {
                 cmd = resolvedConfig.command
+                effectiveCommand = resolvedConfig.command
                 args = resolvedConfig.args
                 // Merge resolved environment variables with existing ones
                 Object.assign(connectEnv, resolvedConfig.env)
-                getServerLogger(server).debug(`Using resolved DXT config`, {
+                getServerLogger(server).debug(`Using resolved package config`, {
                   command: cmd,
                   args
                 })
               } else {
-                getServerLogger(server).warn(`Failed to resolve DXT config, falling back to manifest values`)
+                getServerLogger(server).warn(`Failed to resolve package config, falling back to manifest values`)
               }
             }
 
-            if (server.command === 'npx') {
+            if (effectiveCommand === 'npx') {
               // First, check if npx is available in user's shell environment
               const npxPath = await findCommandInShellEnv('npx', loginShellEnv)
 
@@ -558,36 +544,36 @@ export class McpRuntimeService extends BaseService {
                 // if the server name is mcp-auto-install, use the mcp-registry.json file in the bin directory
                 if (server.name.includes('mcp-auto-install')) {
                   const binPath = await getBinaryPath()
-                  makeSureDirExists(binPath)
+                  await fs.mkdir(binPath, { recursive: true })
                   connectEnv.MCP_REGISTRY_PATH = path.join(binPath, '..', 'config', 'mcp-registry.json')
                 }
               }
-            } else if (server.command === 'uvx' || server.command === 'uv') {
+            } else if (effectiveCommand === 'uvx' || effectiveCommand === 'uv') {
               // First, check if uvx/uv is available in user's shell environment
-              const uvPath = await findCommandInShellEnv(server.command, loginShellEnv)
+              const uvPath = await findCommandInShellEnv(effectiveCommand, loginShellEnv)
 
               if (uvPath) {
                 // Use system uvx/uv
                 cmd = uvPath
-                getServerLogger(server).debug(`Using system ${server.command}`, { command: cmd })
+                getServerLogger(server).debug(`Using system ${effectiveCommand}`, { command: cmd })
               } else {
                 // System command not found, try bundled version as fallback
-                getServerLogger(server).debug(`System ${server.command} not found, checking for bundled version`)
+                getServerLogger(server).debug(`System ${effectiveCommand} not found, checking for bundled version`)
 
-                if (await isBinaryExists(server.command)) {
+                if (await isBinaryExists(effectiveCommand)) {
                   // Fall back to bundled version
-                  cmd = await getBinaryPath(server.command)
-                  getServerLogger(server).info(`Using bundled ${server.command} as fallback (not found in PATH)`, {
+                  cmd = await getBinaryPath(effectiveCommand)
+                  getServerLogger(server).info(`Using bundled ${effectiveCommand} as fallback (not found in PATH)`, {
                     command: cmd
                   })
                 } else {
                   // Neither system nor bundled available
                   throw new Error(
-                    `${server.command} not found in PATH and bundled version is not available. This may indicate an installation issue.\n` +
+                    `${effectiveCommand} not found in PATH and bundled version is not available. This may indicate an installation issue.\n` +
                       'Please either:\n' +
                       '1. Install uv from https://github.com/astral-sh/uv\n' +
                       '2. Run the MCP dependencies installer from Settings\n' +
-                      `3. Restart the application if you recently installed ${server.command}`
+                      `3. Restart the application if you recently installed ${effectiveCommand}`
                   )
                 }
               }
@@ -615,10 +601,10 @@ export class McpRuntimeService extends BaseService {
               stderr: 'pipe'
             }
 
-            // For DXT servers, set the working directory to the extracted path
+            // For package servers, set the working directory to the extracted path
             if (server.dxtPath) {
               transportOptions.cwd = server.dxtPath
-              getServerLogger(server).debug(`Setting working directory for DXT server`, {
+              getServerLogger(server).debug(`Setting working directory for package server`, {
                 cwd: server.dxtPath
               })
             }
@@ -847,9 +833,9 @@ export class McpRuntimeService extends BaseService {
     logger.debug(`Cleared all caches for server`, { serverKey })
   }
 
-  private async getLatestSourcePolicy(server: McpServer): Promise<McpServer> {
+  private getLatestSourcePolicy(server: McpServer): McpServer {
     try {
-      return await mcpServerService.getById(server.id)
+      return mcpServerService.getById(server.id)
     } catch {
       return server
     }
@@ -908,7 +894,7 @@ export class McpRuntimeService extends BaseService {
   }
 
   async stopServer(serverId: string) {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     getServerLogger(server).debug(`Stopping server`)
     this.emitServerLog(server, {
       timestamp: Date.now(),
@@ -925,7 +911,7 @@ export class McpRuntimeService extends BaseService {
   }
 
   async removeServer(serverId: string) {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     try {
       await this.closeClientsForServer(server.id)
     } finally {
@@ -938,7 +924,7 @@ export class McpRuntimeService extends BaseService {
     // md5(baseUrl), so unlinking prematurely would break the remaining entry).
     if (server.baseUrl) {
       try {
-        const { items: remainingServers } = await mcpServerService.list({})
+        const { items: remainingServers } = mcpServerService.list({})
         const baseUrlStillInUse = remainingServers.some((s) => s.id !== server.id && s.baseUrl === server.baseUrl)
         if (!baseUrlStillInUse) {
           const serverUrlHash = crypto.createHash('md5').update(server.baseUrl).digest('hex')
@@ -956,21 +942,21 @@ export class McpRuntimeService extends BaseService {
       }
     }
 
-    // If this is a DXT server, cleanup its directory
+    // If this is a package server, cleanup its directory
     if (server.dxtPath) {
       try {
-        const cleaned = this.dxtService.cleanupDxtServer(server.name)
+        const cleaned = this.mcpPackageService.cleanupPackageServer(server.name)
         if (cleaned) {
-          getServerLogger(server).debug(`Cleaned up DXT server directory`)
+          getServerLogger(server).debug(`Cleaned up package server directory`)
         }
       } catch (error) {
-        getServerLogger(server).error(`Failed to cleanup DXT server`, error as Error)
+        getServerLogger(server).error(`Failed to cleanup package server`, error as Error)
       }
     }
   }
 
   async restartServer(serverId: string) {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     getServerLogger(server).debug(`Restarting server`)
     this.emitServerLog(server, {
       timestamp: Date.now(),
@@ -979,8 +965,12 @@ export class McpRuntimeService extends BaseService {
       source: 'client'
     })
     await this.closeClientsForServer(server.id)
-    // Clear cache before restarting to ensure fresh data
+    // Clear caches before restarting to ensure fresh data. Drop the shared
+    // `mcp.tools.<serverId>` cache too: `McpCatalogService.listTools` is cache-only, so a
+    // restart that fails (e.g. a bad new config) must not leave the old config's tools
+    // visible to agents/chat. `refreshTools` repopulates it on success. (issue #16242)
     this.clearServerCache(server)
+    application.get('McpCatalogService').clearSharedToolsCache(server.id)
     try {
       await this.getOrCreateClient(server)
       await application.get('McpCatalogService').refreshTools(server.id)
@@ -994,7 +984,7 @@ export class McpRuntimeService extends BaseService {
    * Check connectivity for an MCP server
    */
   public async checkMcpConnectivity(serverId: string): Promise<boolean> {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     getServerLogger(server).debug(`Checking connectivity`)
     try {
       const client = await this.getOrCreateClient(server)
@@ -1031,7 +1021,7 @@ export class McpRuntimeService extends BaseService {
    * Call a tool on an MCP server
    */
   public async callTool({ serverId, name, args, callId }: CallToolArgs): Promise<McpCallToolResponse> {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     return this.callToolByServer({ server, name, args, callId })
   }
 
@@ -1058,7 +1048,7 @@ export class McpRuntimeService extends BaseService {
             }
           }
         }
-        const sourcePolicy = await this.getLatestSourcePolicy(server)
+        const sourcePolicy = this.getLatestSourcePolicy(server)
         if (isMcpToolDisabledBySource(sourcePolicy, { name })) {
           throw new Error(`MCP tool is disabled: ${name}`)
         }
@@ -1089,16 +1079,18 @@ export class McpRuntimeService extends BaseService {
       }
     }
 
-    return await withSpanFunc(`${server.name}.${name}`, `MCP`, callToolFunc, [{ server, name, args }])
-  }
-
-  public async getInstallInfo() {
-    const dir = await getBinaryPath()
-    const uvName = await getBinaryName('uv')
-    const bunName = await getBinaryName('bun')
-    const uvPath = path.join(dir, uvName)
-    const bunPath = path.join(dir, bunName)
-    return { dir, uvPath, bunPath }
+    const tracedInput = {
+      server: { id: server.id, name: server.name, type: server.type, description: server.description },
+      name,
+      args
+    }
+    return await withSpanFunc(
+      `${server.name}.${name}`,
+      `MCP`,
+      // oxlint-disable-next-line no-unused-vars
+      (_recorded: typeof tracedInput) => callToolFunc({ server, name, args }),
+      [tracedInput]
+    )
   }
 
   /**
@@ -1131,7 +1123,7 @@ export class McpRuntimeService extends BaseService {
    * List prompts available on an MCP server with caching
    */
   public async listPrompts(serverId: string): Promise<McpPrompt[]> {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     const cachedListPrompts = withCache<[McpServer], McpPrompt[]>(
       this.listPromptsImpl.bind(this),
       (server) => {
@@ -1171,7 +1163,7 @@ export class McpRuntimeService extends BaseService {
     name: string
     args?: Record<string, any>
   }): Promise<GetPromptResult> {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     const cachedGetPrompt = withCache<[McpServer, string, Record<string, any> | undefined], GetPromptResult>(
       this.getPromptImpl.bind(this),
       (server, name, args) => {
@@ -1213,7 +1205,7 @@ export class McpRuntimeService extends BaseService {
    * List resources available on an MCP server with caching
    */
   public async listResources(serverId: string): Promise<McpResource[]> {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     const cachedListResources = withCache<[McpServer], McpResource[]>(
       this.listResourcesImpl.bind(this),
       (server) => {
@@ -1263,7 +1255,7 @@ export class McpRuntimeService extends BaseService {
    */
   @TraceMethod({ spanName: 'getResource', tag: 'mcp' })
   public async getResource({ serverId, uri }: { serverId: string; uri: string }): Promise<GetResourceResponse> {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     const cachedGetResource = withCache<[McpServer, string], GetResourceResponse>(
       this.getResourceImpl.bind(this),
       (server, uri) => {
@@ -1294,7 +1286,7 @@ export class McpRuntimeService extends BaseService {
    * Get the server version information
    */
   public async getServerVersion(serverId: string): Promise<string | null> {
-    const server = await this.getServerById(serverId)
+    const server = this.getServerById(serverId)
     try {
       getServerLogger(server).debug(`Getting server version`)
       const client = await this.getOrCreateClient(server)

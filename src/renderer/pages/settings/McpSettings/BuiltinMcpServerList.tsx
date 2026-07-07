@@ -1,22 +1,22 @@
 import { Badge, Button, Popover, PopoverContent, PopoverTrigger, Tabs, TabsList, TabsTrigger } from '@cherrystudio/ui'
 import CollapsibleSearchBar from '@renderer/components/CollapsibleSearchBar'
+import { SettingTitle } from '@renderer/components/SettingsPrimitives'
 import { useMcpServers } from '@renderer/hooks/useMcpServer'
-import { getBuiltInMcpServerDescriptionLabel } from '@renderer/i18n/label'
-import { builtinMcpServers } from '@renderer/store/mcp'
+import { getBuiltInMcpServerDescriptionLabelKey } from '@renderer/i18n/label'
+import { builtinMcpServers } from '@renderer/pages/settings/McpSettings/builtinMcpServers'
 import { cn } from '@renderer/utils/style'
 import { Check, Plus } from 'lucide-react'
 import type { FC } from 'react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { SettingTitle } from '..'
 import { toCreateMcpServerDto } from './utils'
 
 const BuiltinMcpServerList: FC = () => {
   const { t } = useTranslation()
   const { addMcpServer, mcpServers } = useMcpServers()
   const [searchText, setSearchText] = useState('')
-  const [filter, setFilter] = useState<'all' | 'installed' | 'available'>('all')
+  const [filter, setFilter] = useState<'installed' | 'uninstalled'>('uninstalled')
 
   const installedCount = useMemo(
     () =>
@@ -32,14 +32,14 @@ const BuiltinMcpServerList: FC = () => {
       const isInstalled = mcpServers.some((existingServer) => existingServer.name === server.name)
 
       if (filter === 'installed' && !isInstalled) return false
-      if (filter === 'available' && isInstalled) return false
+      if (filter === 'uninstalled' && isInstalled) return false
 
       if (!keyword) return true
 
-      const description = getBuiltInMcpServerDescriptionLabel(server.name).toLowerCase()
+      const description = t(getBuiltInMcpServerDescriptionLabelKey(server.name)).toLowerCase()
       return server.name.toLowerCase().includes(keyword) || description.includes(keyword)
     })
-  }, [filter, mcpServers, searchText])
+  }, [filter, mcpServers, searchText, t])
 
   return (
     <div className="mb-5">
@@ -53,14 +53,11 @@ const BuiltinMcpServerList: FC = () => {
       <div className="mb-3 flex w-full min-w-0 flex-wrap items-center justify-between gap-3">
         <Tabs value={filter} onValueChange={(value) => setFilter(value as typeof filter)} className="min-w-0">
           <TabsList className="h-8 rounded-full bg-muted/70 p-0.5">
-            <TabsTrigger value="all" className="h-7 rounded-[14px] px-2.5 text-xs">
-              {t('models.all')}
-            </TabsTrigger>
             <TabsTrigger value="installed" className="h-7 rounded-[14px] px-2.5 text-xs">
               {t('settings.skills.installed')}
             </TabsTrigger>
-            <TabsTrigger value="available" className="h-7 rounded-[14px] px-2.5 text-xs">
-              {t('settings.skills.install')}
+            <TabsTrigger value="uninstalled" className="h-7 rounded-[14px] px-2.5 text-xs">
+              {t('settings.mcp.notInstalled')}
             </TabsTrigger>
           </TabsList>
         </Tabs>
@@ -105,13 +102,13 @@ const BuiltinMcpServerList: FC = () => {
                 <Popover>
                   <PopoverTrigger asChild>
                     <div className="line-clamp-2 cursor-pointer text-[13px] text-muted-foreground leading-5 transition-colors hover:text-foreground">
-                      {getBuiltInMcpServerDescriptionLabel(server.name)}
+                      {t(getBuiltInMcpServerDescriptionLabelKey(server.name))}
                     </div>
                   </PopoverTrigger>
                   <PopoverContent align="start" side="top" className="w-auto max-w-100">
                     <div className="mb-2 font-semibold text-foreground text-sm">{server.name}</div>
                     <div className="wrap-break-word whitespace-pre-wrap text-[14px] text-foreground leading-normal">
-                      {getBuiltInMcpServerDescriptionLabel(server.name)}
+                      {t(getBuiltInMcpServerDescriptionLabelKey(server.name))}
                       {server.reference && (
                         <a
                           href={server.reference}
@@ -123,7 +120,7 @@ const BuiltinMcpServerList: FC = () => {
                   </PopoverContent>
                 </Popover>
               </div>
-              <div className="ml-3 flex min-w-[86px] shrink-0 items-center justify-end self-center">
+              <div className="ml-3 flex min-w-21.5 shrink-0 items-center justify-end self-center">
                 {isInstalled ? (
                   <div className="inline-flex h-7 items-center gap-1.5 rounded-lg px-2 text-muted-foreground text-xs">
                     <Check size={13} className="text-success/75" />

@@ -1,6 +1,9 @@
 import { agentTable } from '@data/db/schemas/agent'
 import { agentSessionTable } from '@data/db/schemas/agentSession'
 import { agentSessionMessageTable } from '@data/db/schemas/agentSessionMessage'
+import { agentWorkspaceTable } from '@data/db/schemas/agentWorkspace'
+import { agentMcpServerTable } from '@data/db/schemas/assistantRelations'
+import { mcpServerTable } from '@data/db/schemas/mcpServer'
 import { setupTestDatabase } from '@test-helpers/db'
 import { sql } from 'drizzle-orm'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -21,10 +24,19 @@ async function insertAgent(db: ReturnType<typeof setupTestDatabase>['db'], id: s
 }
 
 async function insertSession(db: ReturnType<typeof setupTestDatabase>['db'], sessionId: string, agentId: string) {
+  const workspaceId = `workspace-${sessionId}`
+  await db.insert(agentWorkspaceTable).values({
+    id: workspaceId,
+    name: workspaceId,
+    path: `/tmp/${workspaceId}`,
+    type: 'user',
+    orderKey: 'a0'
+  })
   await db.insert(agentSessionTable).values({
     id: sessionId,
     agentId,
     name: 'Test Session',
+    workspaceId,
     orderKey: 'a0'
   })
 }
@@ -36,7 +48,7 @@ describe('remapAgentPrefixIds', () => {
     // remapAgentPrefixIds no longer toggles FK itself — it runs inside the engine's
     // migration-wide FK=OFF window (MigrationDbService). Mirror that here so the id-remap
     // UPDATEs don't trip FK enforcement during the transient parent/child id mismatch.
-    await dbh.db.run(sql`PRAGMA foreign_keys = OFF`)
+    dbh.db.run(sql`PRAGMA foreign_keys = OFF`)
   })
 
   it('migrates agent_* prefix IDs to UUIDs and updates FK references', async () => {
@@ -53,6 +65,25 @@ describe('remapAgentPrefixIds', () => {
 
     const sessions = await dbh.db.select().from(agentSessionTable)
     expect(sessions[0].agentId).toBe(agents[0].id)
+  })
+
+  it('rewrites agent_mcp_server.agentId when the agent id is remapped', async () => {
+    const agentId = 'agent_mcp01_abc'
+    await insertAgent(dbh.db, agentId)
+    await dbh.db.insert(mcpServerTable).values({ id: 'mcp-server-1', name: 'Test MCP' })
+    await dbh.db.insert(agentMcpServerTable).values({ agentId, mcpServerId: 'mcp-server-1' })
+
+    await remapAgentPrefixIds(dbh.db)
+
+    const agents = await dbh.db.select().from(agentTable)
+    const junction = await dbh.db.select().from(agentMcpServerTable)
+    expect(junction).toHaveLength(1)
+    expect(junction[0].agentId).toMatch(UUID_PATTERN)
+    expect(junction[0].agentId).toBe(agents[0].id)
+    expect(junction[0].mcpServerId).toBe('mcp-server-1')
+
+    const violations = dbh.db.all(sql`PRAGMA foreign_key_check`)
+    expect(violations).toHaveLength(0)
   })
 
   it('migrates session_* prefix IDs and updates child FK references', async () => {
@@ -116,7 +147,7 @@ describe('remapAgentPrefixIds', () => {
 
     await remapAgentPrefixIds(dbh.db)
 
-    const violations = await dbh.db.all(sql`PRAGMA foreign_key_check`)
+    const violations = dbh.db.all(sql`PRAGMA foreign_key_check`)
     expect(violations).toHaveLength(0)
   })
 })

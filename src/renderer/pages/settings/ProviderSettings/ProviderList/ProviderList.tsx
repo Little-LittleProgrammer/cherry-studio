@@ -8,7 +8,7 @@ import {
   matchKeywordsInProvider
 } from '@renderer/pages/settings/ProviderSettings/utils/providerDisplay'
 import type { Provider } from '@shared/data/types/provider'
-import { canManageProvider, isAnthropicSupportedProvider } from '@shared/utils/provider'
+import { canManageProvider, isAgentSupportedProvider } from '@shared/utils/provider'
 import { Plus } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -33,16 +33,15 @@ export interface ProviderListProps {
 export default function ProviderList({ selectedProviderId, filterModeHint, onSelectProvider }: ProviderListProps) {
   const { t } = useTranslation()
   const { providers } = useProviders()
-  const { models: allModels } = useModels()
   const { applyReorderedList } = useReorder('/providers', { revalidateOnSuccess: false })
   const { isSupported: isOvmsSupported } = useOvmsSupport()
 
   const [filterMode, setFilterMode] = useState<ProviderFilterMode>(filterModeHint ?? 'all')
   const [searchText, setSearchText] = useState('')
+  const { models: allModels } = useModels(undefined, { fetchEnabled: Boolean(searchText.trim()) })
   const [dragging, setDragging] = useState(false)
   const [contextProviderId, setContextProviderId] = useState<string | null>(null)
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
-  const autoDefaultedFilterRef = useRef(false)
 
   const handleToggleGroup = useCallback((presetProviderId: string) => {
     setExpandedGroups((prev) => ({ ...prev, [presetProviderId]: !prev[presetProviderId] }))
@@ -73,15 +72,6 @@ export default function ProviderList({ selectedProviderId, filterModeHint, onSel
 
     setFilterMode(filterModeHint)
   }, [filterModeHint])
-
-  useEffect(() => {
-    if (autoDefaultedFilterRef.current) return
-    if (filterModeHint || providers.length === 0) return
-    autoDefaultedFilterRef.current = true
-    if (!providers.some((p) => p.isEnabled)) {
-      setFilterMode('all')
-    }
-  }, [filterModeHint, providers])
 
   useEffect(() => {
     if (!selectedProviderId) return
@@ -122,7 +112,7 @@ export default function ProviderList({ selectedProviderId, filterModeHint, onSel
       if (filterMode === 'disabled' && provider.isEnabled) {
         return false
       }
-      if (filterMode === 'agent' && !isAnthropicSupportedProvider(provider)) {
+      if (filterMode === 'agent' && !isAgentSupportedProvider(provider)) {
         return false
       }
       const keywords = searchText.toLowerCase().split(/\s+/).filter(Boolean)
@@ -273,11 +263,18 @@ export default function ProviderList({ selectedProviderId, filterModeHint, onSel
   const handleAddAnother = useCallback((template: Provider) => startAddFrom(template), [startAddFrom])
 
   return (
-    <aside className={`provider-settings-default-scope ${providerListClasses.shell}`}>
+    <aside className={`${providerListClasses.shell}`}>
       <PageHeader
         title={t('settings.provider.title')}
         action={
-          <ProviderListHeaderFilterMenu filterMode={filterMode} disabled={dragging} onFilterChange={setFilterMode} />
+          <button
+            type="button"
+            aria-label={t('settings.provider.add.title')}
+            disabled={dragging}
+            onClick={startAdd}
+            className={providerListClasses.headerAddButton}>
+            <Plus size={16} strokeWidth={2.5} />
+          </button>
         }
       />
       <ProviderListSearchField
@@ -285,14 +282,13 @@ export default function ProviderList({ selectedProviderId, filterModeHint, onSel
         disabled={dragging}
         onValueChange={setSearchText}
         trailing={
-          <button
-            type="button"
-            aria-label={t('settings.provider.add.title')}
+          <ProviderListHeaderFilterMenu
+            filterMode={filterMode}
             disabled={dragging}
-            onClick={startAdd}
-            className={providerListClasses.searchInlineAddButton}>
-            <Plus size={14} />
-          </button>
+            triggerClassName={providerListClasses.searchInlineAddButton}
+            triggerIconSize={13}
+            onFilterChange={setFilterMode}
+          />
         }
       />
       <ProviderListContent

@@ -1,12 +1,11 @@
-import './assets/styles/provider-settings-scoped-theme.css'
-
 import { usePersistCache } from '@data/hooks/useCache'
 import { useProviders } from '@renderer/hooks/useProvider'
 import { useNavigate, useSearch } from '@tanstack/react-router'
+import { omit } from 'es-toolkit/compat'
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useProviderDeepLinkImport } from './hooks/useProviderDeepLinkImport'
-import ProviderList from './ProviderList'
+import { ProviderList } from './ProviderList'
 import ProviderSetting from './ProviderSetting'
 import { isProviderSettingsListVisibleProvider } from './utils/providerDisplay'
 
@@ -68,7 +67,7 @@ export default function ProviderSettingsPage({ isOnboarding = false }: ProviderS
     }
 
     if (shouldConsume) {
-      const restSearch = Object.fromEntries(Object.entries(search).filter(([key]) => key !== 'filter' && key !== 'id'))
+      const restSearch = omit(search, ['filter', 'id'])
       void navigate({ to: '/settings/provider', search: restSearch as Record<string, string>, replace: true })
     }
   }, [navigate, search, setSelectedProviderId, visibleProviders])
@@ -90,7 +89,7 @@ export default function ProviderSettingsPage({ isOnboarding = false }: ProviderS
   )
 
   return (
-    <div className="provider-settings-default-scope provider-settings-layout-cq relative flex h-full min-h-0 w-full min-w-0 overflow-hidden">
+    <div className="relative flex h-full min-h-0 w-full min-w-0 overflow-hidden">
       <ProviderList
         selectedProviderId={selectedProviderId}
         filterModeHint={filterModeHint}

@@ -22,6 +22,7 @@ import type {
   PermissionResult,
   SdkPluginConfig
 } from '@anthropic-ai/claude-agent-sdk'
+import { application } from '@application'
 import { agentChannelService as channelService } from '@data/services/AgentChannelService'
 import { agentService } from '@data/services/AgentService'
 import { mcpServerService } from '@data/services/McpServerService'
@@ -31,45 +32,54 @@ import { loggerService } from '@logger'
 import { isProvisioned, provisionBuiltinAgent } from '@main/ai/agents/builtin/BuiltinAgentProvisioner'
 import { PromptBuilder } from '@main/ai/agents/cherryclaw/prompt'
 import AssistantServer from '@main/ai/mcp/servers/assistant'
+import CherryBuiltinToolsServer from '@main/ai/mcp/servers/cherryBuiltinTools'
 import ClawServer from '@main/ai/mcp/servers/claw'
 import WorkspaceMemoryServer from '@main/ai/mcp/servers/workspaceMemory'
 import { createSdkMcpServerInstance } from '@main/ai/runtime/claudeCode/createSdkMcpServerInstance'
 import { skillService } from '@main/ai/skills/SkillService'
+import { wrapSteerReminder } from '@main/ai/steerReminder'
 import { createClaudeAgentToolPolicySnapshot } from '@main/ai/tools/adapters/claudeCode/agentTools'
-import { application } from '@main/core/application'
-import { isLinux, isWin } from '@main/core/platform'
-import { getProxyEnvironment } from '@main/services/proxy/nodeProxy'
-import { toAsarUnpackedPath } from '@main/utils'
-import { getPathStatus, type PathStatus } from '@main/utils/file/pathStatus'
-import { getAppLanguage, t } from '@main/utils/language'
-import { autoDiscoverGitBash, getBinaryPath } from '@main/utils/process'
+import {
+  CHERRY_BUILTIN_APPROVAL_REQUIRED_TOOL_NAMES,
+  CHERRY_BUILTIN_AUTO_APPROVED_TOOL_NAMES,
+  toCherryBuiltinRuntimeName
+} from '@main/ai/tools/adapters/claudeCode/cherryBuiltinApproval'
+import { type ClaudeToolContext, resolveDisallowedTools } from '@main/ai/tools/adapters/claudeCode/toolConditions'
+import { isLinux, isMac, isWin } from '@main/core/platform'
+import { getAppLanguage, t } from '@main/i18n'
+import { getProxyEnvironment } from '@main/services/proxy/proxyEnv'
+import { toAsarUnpackedPath } from '@main/utils/asar'
+import { getBinaryPath } from '@main/utils/binaryResolver'
+import { autoDiscoverGitBash } from '@main/utils/commandResolver'
+import { getPathStatus, type PathStatus } from '@main/utils/file'
 import { rtkRewrite } from '@main/utils/rtk'
-import getLoginShellEnvironment from '@main/utils/shell-env'
+import { getShellEnv } from '@main/utils/shellEnv'
 import {
   CHANNEL_SECURITY_PROMPT,
-  GLOBALLY_DISALLOWED_TOOLS,
+  REPORT_ARTIFACTS_PROMPT,
   SOUL_MODE_DISALLOWED_TOOLS
 } from '@shared/ai/claudecode/constants'
-import { languageEnglishNameMap } from '@shared/config/languages'
+import { toCamelCase } from '@shared/ai/tools/mcpToolName'
 import type { AgentEntity } from '@shared/data/api/schemas/agents'
 import type { AgentSessionEntity } from '@shared/data/api/schemas/agentSessions'
+import { AGENT_WORKSPACE_TYPE, type AgentSessionWorkspaceSource } from '@shared/data/api/schemas/agentWorkspaces'
+import type { McpServer } from '@shared/data/types/mcpServer'
 import { parseUniqueModelId } from '@shared/data/types/model'
 import type { Provider } from '@shared/data/types/provider'
 import type { CherryToolMeta } from '@shared/data/types/uiParts'
+import type { McpTool } from '@shared/types/mcp'
+import { languageEnglishNameMap } from '@shared/utils/languages'
+import { isExternalCliProvider } from '@shared/utils/provider'
 import { app } from 'electron'
 
+import type { AgentRuntimeUserInput } from '../types'
+import { detectGlobalInstall } from './dependencyGuard'
 import { toolApprovalRegistry } from './ToolApprovalRegistry'
-import type { ClaudeCodeSettings, ToolApprovalEmitterHolder } from './types'
+import type { ClaudeCodeSettings, McpToolDisplayMetadata, SteerHolder, ToolApprovalEmitterHolder } from './types'
 
 const logger = loggerService.withContext('ClaudeCodeSettingsBuilder')
 const require_ = createRequire(import.meta.url)
 const promptBuilder = new PromptBuilder()
-
-// ── Tool call ID convention ─────────────────────────────────────────
-
-function buildNamespacedToolCallId(sessionId: string, rawToolCallId: string): string {
-  return `${sessionId}:${rawToolCallId}`
-}
 
 const toolApprovalEmitters = new Map<string, ToolApprovalEmitterHolder>()
 
@@ -93,6 +103,75 @@ function getToolApprovalEmitterHolder(sessionId: string): ToolApprovalEmitterHol
   return holder
 }
 
+// Non-creating read of the live approval-emitter holder. A warm-pooled query's baked `canUseTool`
+// resolves the emitter by id at fire-time and must NOT resurrect an evicted holder — `undefined`
+// means no live stream is bound, so the approval is denied.
+function peekToolApprovalEmitter(sessionId: string): ToolApprovalEmitterHolder | undefined {
+  return toolApprovalEmitters.get(sessionId)
+}
+
+// Session-keyed so a warm-pooled query's PreToolUse steer hook and the live connection's
+// `redirect()` reference the SAME holder (the warm pool strips closures from its signature, so the
+// query carries prewarm-time hooks — they must resolve session state by id, not by closure).
+const steerHolders = new Map<string, SteerHolder>()
+
+function getSteerHolder(sessionId: string): SteerHolder {
+  let holder = steerHolders.get(sessionId)
+  if (!holder) {
+    const nextHolder: SteerHolder = {
+      pending: [],
+      dispose: () => {
+        nextHolder.pending = []
+        if (steerHolders.get(sessionId) === nextHolder) steerHolders.delete(sessionId)
+      }
+    }
+    holder = nextHolder
+    steerHolders.set(sessionId, holder)
+  }
+  return holder
+}
+
+// Session-keyed for the same reason as the steer/approval holders: a warm-pooled query's baked
+// `canUseTool` + disabled-tool hook must resolve the live snapshot by id at fire-time, not capture a
+// per-build instance. Without this, a warm-hit connection rebuilds a fresh snapshot the running
+// subprocess never sees, so mid-session tool-policy updates would silently no-op.
+type ToolPolicySnapshot = Awaited<ReturnType<typeof createClaudeAgentToolPolicySnapshot>>
+const toolPolicySnapshots = new Map<string, ToolPolicySnapshot>()
+
+async function ensureToolPolicySnapshot(
+  sessionId: string,
+  agent: AgentEntity,
+  options: Parameters<typeof createClaudeAgentToolPolicySnapshot>[1]
+): Promise<ToolPolicySnapshot> {
+  const existing = toolPolicySnapshots.get(sessionId)
+  if (existing) {
+    // Connect (including a warm-hit) refreshes the shared instance with the current agent so a
+    // policy change made between prewarm and connect is honored on the running subprocess.
+    await existing.update(agent)
+    return existing
+  }
+  const snapshot = await createClaudeAgentToolPolicySnapshot(agent, options)
+  toolPolicySnapshots.set(sessionId, snapshot)
+  return snapshot
+}
+
+function getToolPolicySnapshot(sessionId: string): ToolPolicySnapshot | undefined {
+  return toolPolicySnapshots.get(sessionId)
+}
+
+export function disposeToolPolicySnapshot(sessionId: string): void {
+  toolPolicySnapshots.delete(sessionId)
+}
+
+function extractSteerText(input: AgentRuntimeUserInput): string {
+  return (
+    input.message.data?.parts
+      ?.filter((part): part is { type: 'text'; text: string } => part.type === 'text' && 'text' in part)
+      .map((part) => part.text)
+      .join('\n') ?? ''
+  )
+}
+
 /**
  * Build a lightweight environment snapshot (~200 tokens) for Cherry Assistant.
  * Injected into system prompt so the agent knows the user's setup immediately.
@@ -103,10 +182,10 @@ async function buildAssistantContext(): Promise<string> {
   const language = application.get('PreferenceService').get('app.language')
   const theme = application.get('PreferenceService').get('ui.theme_mode')
   const proxy = application.get('PreferenceService').get('app.proxy.url')
-  const providers = await providerService.list({})
+  const providers = providerService.list({})
   // MCP summary
-  const mcpServers = (await mcpServerService.list({})).items
-  const activeMcp = (await mcpServerService.list({ isActive: true })).items
+  const mcpServers = mcpServerService.list({}).items
+  const activeMcp = mcpServerService.list({ isActive: true }).items
 
   // Network probe (parallel, 2s timeout each)
   const probeResults = await Promise.allSettled([
@@ -180,18 +259,14 @@ export async function buildClaudeCodeSessionSettings(
   if (!session.agentId) {
     throw new Error(`Cannot build settings for orphan session ${session.id} — its agent was deleted`)
   }
-  const agent = await agentService.getAgent(session.agentId)
+  const agent = agentService.getAgent(session.agentId)
   if (!agent) {
     throw new Error(`Agent not found for session ${session.id}: ${session.agentId}`)
   }
 
   // 1. Working directory (session-bound)
-  const cwd = session.workspace?.path
-  if (!cwd) {
-    throw new AgentSessionWorkspaceError(`Agent session ${session.id} has no workspace configured`)
-  }
-  await assertClaudeCodeWorkspaceDirectory(session.id, cwd)
-  await skillService.reconcileAgentSkills(session.agentId, cwd)
+  const cwd = session.workspace.path
+  await prepareClaudeCodeWorkspaceDirectory(session)
 
   // 2. Environment variables
   const env = await buildEnvironment(provider, agent)
@@ -205,11 +280,10 @@ export async function buildClaudeCodeSessionSettings(
   // `dispose` drops any approval still pending for this session when the
   // stream exits abnormally.
   const approvalEmitter = getToolApprovalEmitterHolder(session.id)
-  const { canUseTool, hooks, allowedTools, disallowedTools, toolPolicySnapshot } = await buildToolPermissions(
-    session,
-    agent,
-    approvalEmitter
-  )
+  const steerHolder = getSteerHolder(session.id)
+  // The hooks resolve the approval emitter / steer holder by session id at fire-time, so they are
+  // not passed in; the holders above are created here only to expose them on `settings`.
+  const { canUseTool, hooks, disallowedTools, toolPolicySnapshot } = await buildToolPermissions(session, agent)
 
   // 5. System prompt
   const systemPrompt = await buildSystemPrompt(session, agent, cwd)
@@ -218,29 +292,39 @@ export async function buildClaudeCodeSessionSettings(
   const agentConfig = agent.configuration
   const soulEnabled = agentConfig?.soul_enabled === true
   const isAssistant = agentConfig?.builtin_role === 'assistant'
-  const mcpServers = await buildMcpServers(session, agent, soulEnabled, isAssistant)
+  const mcpServers = buildMcpServers(session, agent, soulEnabled, isAssistant)
+  const mcpToolMetadata = await buildMcpToolMetadata(agent)
 
-  // 8. Adjust allowedTools for injected MCP servers
-  const finalAllowedTools = adjustAllowedToolsForMcp(allowedTools, soulEnabled, isAssistant)
+  // 8. Auto-approve allowlist for injected built-in MCP servers (soul/assistant only)
+  const finalAllowedTools = adjustAllowedToolsForMcp(soulEnabled, isAssistant)
 
-  // 9. Build settings
+  // 9. Skills — pass the SDK skill-name whitelist (managed skills enabled for this
+  // agent + the workspace's own .claude/skills). The CLAUDE_CONFIG_DIR/skills mirror
+  // is maintained by SkillService (install/uninstall/startup), not here.
+  const skills = await buildSkillWhitelist(agent.id, cwd)
+
+  // 10. Build settings
   const settings: ClaudeCodeSettings = {
     cwd,
     env,
     pathToClaudeCodeExecutable: resolveClaudeExecutablePath(),
     systemPrompt,
     settingSources: getSettingSources(agent),
+    settings: { autoCompactEnabled: true },
     includePartialMessages: true,
     permissionMode: agentConfig?.permission_mode,
     maxTurns: agentConfig?.max_turns,
     allowedTools: finalAllowedTools,
     disallowedTools,
     plugins,
+    skills,
     canUseTool,
     hooks,
     approvalEmitter,
+    steerHolder,
     toolPolicySnapshot,
     warmQueryKey: session.id,
+    ...(mcpToolMetadata ? { mcpToolMetadata } : {}),
     ...(mcpServers ? { mcpServers, strictMcpConfig: true } : {}),
     ...(options?.thinkingOptions?.effort ? { effort: options.thinkingOptions.effort } : {}),
     ...(options?.thinkingOptions?.thinking ? { thinking: options.thinkingOptions.thinking } : {}),
@@ -286,6 +370,76 @@ export function isAgentSessionWorkspaceError(error: unknown): error is AgentSess
   return error instanceof AgentSessionWorkspaceError
 }
 
+export async function prepareClaudeCodeWorkspaceDirectory(session: AgentSessionEntity): Promise<void> {
+  const workspace = session.workspace
+  switch (workspace.type) {
+    case AGENT_WORKSPACE_TYPE.SYSTEM:
+      // System workspaces are app-owned session directories; user workspaces
+      // must already exist, so auto-creating them would mask a bad user path.
+      await ensureSystemWorkspaceDirectory(workspace.path)
+      break
+    case AGENT_WORKSPACE_TYPE.USER:
+      break
+    default: {
+      const exhaustive: never = workspace.type
+      throw new AgentSessionWorkspaceError(`Unsupported workspace type: ${String(exhaustive)}`)
+    }
+  }
+  await assertClaudeCodeWorkspaceDirectory(session.id, workspace.path)
+}
+
+async function ensureSystemWorkspaceDirectory(cwd: string): Promise<void> {
+  await assertSystemWorkspacePath(cwd)
+  const status = await getPathStatus(cwd)
+  if (status.ok && status.kind === 'directory') return
+  if (status.ok) {
+    throw new AgentSessionWorkspaceError(workspacePathErrorMessage(cwd, status))
+  }
+  if (status.reason === 'inaccessible') {
+    throw new AgentSessionWorkspaceError(workspacePathErrorMessage(cwd, status))
+  }
+
+  try {
+    await fs.promises.mkdir(cwd, { recursive: true })
+  } catch (error) {
+    logger.warn(`Failed to create system workspace directory: ${cwd}`, { error })
+    throw new AgentSessionWorkspaceError(workspacePathErrorMessage(cwd, { ok: false, reason: 'inaccessible' }))
+  }
+}
+
+async function assertSystemWorkspacePath(cwd: string): Promise<void> {
+  // Resolve symlinks through the nearest existing ancestor before containment
+  // checks, so a symlink under the managed root cannot escape it.
+  const root = await resolveRealOrNearestExistingPath(path.resolve(application.getPath('feature.agents.workspaces')))
+  const target = await resolveRealOrNearestExistingPath(path.resolve(cwd))
+  const relative = path.relative(root, target)
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new AgentSessionWorkspaceError(`System workspace path is outside the managed workspace root: ${cwd}`)
+  }
+}
+
+async function resolveRealOrNearestExistingPath(targetPath: string): Promise<string> {
+  try {
+    return path.normalize(await fs.promises.realpath(targetPath))
+  } catch {
+    let currentPath = path.dirname(targetPath)
+
+    while (true) {
+      try {
+        const realCurrentPath = await fs.promises.realpath(currentPath)
+        const relativeSuffix = path.relative(currentPath, targetPath)
+        return path.normalize(path.join(realCurrentPath, relativeSuffix))
+      } catch {
+        const parentPath = path.dirname(currentPath)
+        if (parentPath === currentPath) {
+          return path.normalize(targetPath)
+        }
+        currentPath = parentPath
+      }
+    }
+  }
+}
+
 export async function assertClaudeCodeWorkspaceDirectory(sessionId: string, cwd: string): Promise<void> {
   const status = await getPathStatus(cwd)
   if (status.ok && status.kind === 'directory') return
@@ -308,11 +462,8 @@ function workspacePathErrorMessage(path: string, status: PathStatus): string {
     : t('agent.session.workspace_status.inaccessible', { path })
 }
 
-async function buildEnvironment(
-  _provider: Provider, // retained for API compat; providerId resolved from agent.model
-  agent: AgentEntity
-): Promise<Record<string, string | undefined>> {
-  const loginShellEnv = await getLoginShellEnvironment()
+async function buildEnvironment(provider: Provider, agent: AgentEntity): Promise<Record<string, string | undefined>> {
+  const loginShellEnv = await getShellEnv()
   const customGitBashPath = isWin ? autoDiscoverGitBash() : null
   const bunPath = await getBinaryPath('bun')
 
@@ -325,29 +476,39 @@ async function buildEnvironment(
     throw new Error(`buildEnvironment: agent ${agent.id} has no model`)
   }
   const { providerId, modelId: rawModelId } = parseUniqueModelId(agent.model)
-  let apiModelId = rawModelId
-  try {
-    const model = await modelService.getByKey(providerId, rawModelId)
-    apiModelId = model.apiModelId ?? rawModelId
-  } catch {
-    // Model not in model table — use raw ID (common for agent-specific models)
+  const { providerId: sonnetProviderId, modelId: sonnetModelId } = parseUniqueModelId(agent?.planModel ?? agent.model)
+  const { providerId: haikuProviderId, modelId: haikuModelId } = parseUniqueModelId(agent?.smallModel ?? agent.model)
+  // Resolve each model id independently: one model missing from the table must not force the others
+  // to fall back, and each falls back to its OWN raw id (not the main model's). Common for
+  // agent-specific models that aren't in the model table.
+  const resolveApiModelId = (providerKey: string, modelKey: string): string => {
+    try {
+      const model = modelService.getByKey(providerKey, modelKey)
+      return model.apiModelId ?? modelKey
+    } catch {
+      return modelKey
+    }
   }
+  const apiModelId = resolveApiModelId(providerId, rawModelId)
+  const sonnetApiModelId = resolveApiModelId(sonnetProviderId, sonnetModelId)
+  const haikuApiModelId = resolveApiModelId(haikuProviderId, haikuModelId)
 
   const env: Record<string, string | undefined> = {
     ...loginShellEnv,
     ...getProxyEnvironment(process.env),
     CLAUDE_CODE_USE_BEDROCK: '0',
+    CLAUDE_CODE_USE_VERTEX: '0',
     // ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL are injected by the runtime query builder,
     // not duplicated here.
     ANTHROPIC_MODEL: apiModelId,
     ANTHROPIC_DEFAULT_OPUS_MODEL: apiModelId,
-    ANTHROPIC_DEFAULT_SONNET_MODEL: apiModelId,
-    // TODO: support set small model in UI
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: apiModelId,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: sonnetApiModelId,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: haikuApiModelId,
     ELECTRON_RUN_AS_NODE: '1',
     ELECTRON_NO_ATTACH_CONSOLE: '1',
     CLAUDE_CONFIG_DIR: application.getPath('feature.agents.claude.root'),
     ENABLE_TOOL_SEARCH: 'auto',
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
     CHERRY_STUDIO_BUN_PATH: bunPath,
     ...(customGitBashPath ? { CLAUDE_CODE_GIT_BASH_PATH: customGitBashPath } : {})
   }
@@ -367,9 +528,12 @@ async function buildEnvironment(
       'ELECTRON_NO_ATTACH_CONSOLE',
       'CLAUDE_CONFIG_DIR',
       'CLAUDE_CODE_USE_BEDROCK',
+      'CLAUDE_CODE_USE_VERTEX',
       'CLAUDE_CODE_GIT_BASH_PATH',
+      'ENABLE_TOOL_SEARCH',
       'CHERRY_STUDIO_NODE_PROXY_RULES',
       'CHERRY_STUDIO_NODE_PROXY_BYPASS_RULES',
+      'CHERRY_STUDIO_BUN_PATH',
       'NODE_OPTIONS',
       '__PROTO__',
       'CONSTRUCTOR',
@@ -384,7 +548,62 @@ async function buildEnvironment(
     }
   }
 
+  // Claude Code (login) provider: reuse the user's Claude Code CLI subscription
+  // login (Claude Pro/Max OAuth) instead of an API key. The Claude Agent SDK
+  // falls back to the stored OAuth credential ONLY when no credential is forced
+  // via env, so strip every auth channel that could ride in from the login shell
+  // or user env_vars (which merged above) and silently override it: the API key
+  // / auth token, a base-URL redirect, custom headers (e.g. an inherited
+  // Authorization / x-api-key), and a directly-supplied OAuth token. The
+  // warm-query builder already skips injecting the API key for this provider.
+  // The Agent SDK only falls through to macOS Keychain lookup when CLAUDE_CONFIG_DIR
+  // is absent; Cherry's isolated agent config dir would otherwise mask a valid
+  // CLI login. Elsewhere credentials live in <CLAUDE_CONFIG_DIR>/.credentials.json,
+  // so point at the user's real config dir (their shell's CLAUDE_CONFIG_DIR, or
+  // ~/.claude) rather than Cherry's relocated agent config.
+  if (isExternalCliProvider(provider)) {
+    delete env.ANTHROPIC_API_KEY
+    delete env.ANTHROPIC_AUTH_TOKEN
+    delete env.ANTHROPIC_BASE_URL
+    delete env.ANTHROPIC_CUSTOM_HEADERS
+    delete env.CLAUDE_CODE_OAUTH_TOKEN
+    if (isMac) {
+      delete env.CLAUDE_CONFIG_DIR
+    } else {
+      env.CLAUDE_CONFIG_DIR = loginShellEnv.CLAUDE_CONFIG_DIR || path.join(application.getPath('sys.home'), '.claude')
+    }
+  }
+
   return env
+}
+
+/**
+ * Compute the SDK `Options.skills` whitelist for a session.
+ *
+ * `Options.skills` is a *filter over everything the SDK discovers* — both the
+ * managed mirror under CLAUDE_CONFIG_DIR/skills (maintained by `SkillService`)
+ * and the workspace's own `cwd/.claude/skills`. So the whitelist must list:
+ *   - the agent's enabled managed skills, and
+ *   - the workspace's project-local skills (omitting them would filter the
+ *     user's own project skills out of their session).
+ *
+ * We match by *directory name only* (`folderName` for managed skills, the
+ * `.claude/skills/<dir>` name for workspace skills). The SDK also matches the
+ * SKILL.md `name`, but that field is not unique — including it would let an
+ * enabled skill's name un-hide a different, disabled skill that happens to
+ * share it. Directory names are unique within each root, so they can't collide.
+ *
+ * Read-only: the filesystem mirror is maintained at install / uninstall /
+ * startup reconcile, never here — so concurrent session builds never race.
+ */
+export async function buildSkillWhitelist(agentId: string, cwd: string): Promise<string[]> {
+  const installedSkills = await skillService.list({ agentId })
+  const enabledNames = installedSkills.filter((skill) => skill.isEnabled).map((skill) => skill.folderName)
+
+  const workspaceSkills = await skillService.listLocal(cwd)
+  const workspaceNames = workspaceSkills.map((skill) => skill.filename)
+
+  return Array.from(new Set([...enabledNames, ...workspaceNames]))
 }
 
 async function discoverPlugins(cwd: string, agentId: string): Promise<SdkPluginConfig[] | undefined> {
@@ -411,23 +630,54 @@ async function discoverPlugins(cwd: string, agentId: string): Promise<SdkPluginC
 
 async function buildToolPermissions(
   session: AgentSessionEntity,
-  agent: AgentEntity,
-  approvalEmitter: ToolApprovalEmitterHolder
+  agent: AgentEntity
 ): Promise<{
   canUseTool: CanUseTool
   hooks: ClaudeCodeSettings['hooks']
-  allowedTools: string[] | undefined
   disallowedTools: string[]
   toolPolicySnapshot: Awaited<ReturnType<typeof createClaudeAgentToolPolicySnapshot>>
 }> {
   const agentConfig = agent.configuration
   const soulEnabled = agentConfig?.soul_enabled === true
   const isAssistant = agentConfig?.builtin_role === 'assistant'
-  const toolPolicySnapshot = await createClaudeAgentToolPolicySnapshot(agent, {
+
+  // Raw session context for tool enable-predicates (worktree needs .git; claw notify/config need a
+  // connected channel). Channels are fetched once here so the predicates stay synchronous.
+  const cwd = session.workspace?.path
+  const conditionContext: ClaudeToolContext | undefined = cwd
+    ? {
+        cwd,
+        channels: (() => {
+          try {
+            return channelService.listChannels({ agentId: agent.id })
+          } catch (error) {
+            logger.warn('Failed to list channels for tool policy context', {
+              agentId: agent.id,
+              error: error instanceof Error ? error.message : String(error)
+            })
+            return []
+          }
+        })()
+      }
+    : undefined
+
+  const toolPolicySnapshot = await ensureToolPolicySnapshot(session.id, agent, {
     autoAllowRuntimeNamePrefixes: [
+      // cherry-tools is injected for every session. Auto-allowing it (no per-call approval) is a
+      // deliberate decision (matches feat/chat-page): its READ tools have no side effects in the
+      // main process — web_search/web_fetch read the network, kb_search/kb_read/kb_list read the
+      // user's knowledge bases, report_artifacts only records a declaration. The
+      // untrusted-channel exposure this creates (approval-free reads + web_fetch URL egress for
+      // channel-linked sessions) is bounded by the system-level channel security policy
+      // (CHANNEL_SECURITY_PROMPT). The MUTATING kb_manage tool is carved out below — it modifies the
+      // user's knowledge bases, so it must go through per-call approval rather than this prefix.
+      'mcp__cherry-tools__',
       ...(soulEnabled ? ['mcp__claw__'] : []),
       ...(isAssistant ? ['mcp__assistant__'] : [])
-    ]
+    ],
+    // Mutating cherry-tools (kb_manage) match the prefix above but must still prompt for approval.
+    autoAllowRuntimeNameExceptions: CHERRY_BUILTIN_APPROVAL_REQUIRED_TOOL_NAMES.map(toCherryBuiltinRuntimeName),
+    conditionContext
   })
 
   const canUseTool: CanUseTool = async (toolName, input, opts) => {
@@ -435,14 +685,21 @@ async function buildToolPermissions(
       return { behavior: 'deny', message: 'Tool request was cancelled' }
     }
 
-    const access = toolPolicySnapshot.resolve(toolName, input)
+    // Resolve the snapshot by id at fire-time — a warm-pooled query's baked `canUseTool` must read
+    // the live session snapshot, not a per-build instance the running subprocess never sees.
+    const snapshot = getToolPolicySnapshot(session.id)
+    if (!snapshot) {
+      logger.warn('canUseTool fired with no live tool-policy snapshot — denying', { toolName })
+      return { behavior: 'deny', message: 'Tool policy not ready' }
+    }
+
+    const access = snapshot.resolve(toolName, input)
     if (access?.approval === 'auto') {
       return { behavior: 'allow', updatedInput: input }
     }
 
-    const namespacedToolCallId = buildNamespacedToolCallId(session.id, opts.toolUseID)
     const approvalId = randomUUID()
-    const emit = approvalEmitter.emit
+    const emit = peekToolApprovalEmitter(session.id)?.emit
     if (!emit) {
       logger.warn('Approval requested but no emitter bound — denying', { approvalId, toolName })
       return { behavior: 'deny', message: 'Approval emitter not ready' }
@@ -451,7 +708,7 @@ async function buildToolPermissions(
       toolApprovalRegistry.register({
         approvalId,
         sessionId: session.id,
-        toolCallId: namespacedToolCallId,
+        toolCallId: opts.toolUseID,
         toolName,
         originalInput: input,
         signal: opts.signal,
@@ -460,16 +717,41 @@ async function buildToolPermissions(
       emit({
         type: 'tool-approval-request',
         approvalId,
-        toolCallId: namespacedToolCallId,
+        toolCallId: opts.toolUseID,
         providerMetadata: { cherry: { transport: 'claude-agent', toolName } satisfies CherryToolMeta }
       })
     })
   }
 
+  // Block global/shared dependency installs before they run, to prevent cross-agent dependency
+  // pollution: the runtime keeps the user's real HOME, so `-g` / `uv tool install` / `pip --user`
+  // would leak into ~/.bun, ~/.local/share/uv, … shared by every session. Fires on every Bash call
+  // regardless of permission mode (same rationale as disabledToolHook). Project-local installs and
+  // ephemeral runners (`bun x` / `uvx`) are not flagged. Deny (not rewrite) so the model adapts to a
+  // project-local install on its own — rewriting global→local semantics is fragile.
+  const dependencyIsolationHook: HookCallback = async (input): Promise<HookJSONOutput> => {
+    if (!input || input.hook_event_name !== 'PreToolUse') return {}
+    const toolName = String((input as Record<string, unknown>).tool_name ?? '')
+    if (toolName !== 'Bash') return {}
+    const toolInput = (input as Record<string, unknown>).tool_input as Record<string, unknown> | undefined
+    const command = toolInput?.command
+    if (typeof command !== 'string' || !command.trim()) return {}
+    const reason = detectGlobalInstall(command)
+    if (!reason) return {}
+    logger.info('Blocked global install to prevent dependency pollution', { sessionId: session.id, reason })
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: `Blocked to avoid cross-agent dependency pollution: ${reason}. Install into the current project instead (e.g. \`bun install <pkg>\`, or \`uv run --with <pkg> python\` for Python). For one-off tools use \`bun x <tool>\` / \`uvx <tool>\` (ephemeral).`
+      }
+    }
+  }
+
   const rtkRewriteHook: HookCallback = async (input): Promise<HookJSONOutput> => {
     if (!input || input.hook_event_name !== 'PreToolUse') return {}
     const toolName = String((input as Record<string, unknown>).tool_name ?? '')
-    if (toolName !== 'Bash' && toolName !== 'builtin_Bash') return {}
+    if (toolName !== 'Bash') return {}
     const toolInput = (input as Record<string, unknown>).tool_input as Record<string, unknown> | undefined
     const command = toolInput?.command
     if (typeof command !== 'string' || !command.trim()) return {}
@@ -479,20 +761,99 @@ async function buildToolPermissions(
     return { hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { ...toolInput, command: rewritten } } }
   }
 
+  // disabledTools enforcement runs as a PreToolUse hook, not in `canUseTool`: the SDK skips
+  // `canUseTool` for auto-approved paths (bypassPermissions / acceptEdits / default safe-tools), but
+  // PreToolUse hooks fire on every tool call regardless of permission mode. The snapshot's disabled
+  // set is refreshed in place on every successful agent update, so a mid-session disable is denied on
+  // the warm connection in all modes without a reconnect. (A policy update that the SDK rejects is a
+  // separate path — AgentSessionRuntimeService fails closed by tearing the connection down.)
+  const disabledToolHook: HookCallback = async (input): Promise<HookJSONOutput> => {
+    if (!input || input.hook_event_name !== 'PreToolUse') return {}
+    const toolName = String((input as Record<string, unknown>).tool_name ?? '')
+    if (!toolName) return {}
+    // Resolve by id at fire-time so a warm-pooled query's baked hook sees the live disabled set.
+    const snapshot = getToolPolicySnapshot(session.id)
+    if (!snapshot || !snapshot.isDisabled(toolName)) return {}
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: `The ${toolName} tool is disabled for this agent.`
+      }
+    }
+  }
+
+  // Real mid-turn steer (the agent SDK has no native steer API): when a steer is stashed via the
+  // connection's `redirect()`, inject it as `additionalContext` before the next tool runs so the
+  // model can change direction without aborting. If the turn ends with no tool call, the connection
+  // emits `steer-undelivered` and the host queues it as the next turn instead.
+  const steerHook: HookCallback = async (input): Promise<HookJSONOutput> => {
+    if (!input || input.hook_event_name !== 'PreToolUse') return {}
+    // Resolve the steer holder by id at fire-time — the prewarm-baked hook must read the live
+    // holder the connection wired, not a holder instance captured before this connection existed.
+    const holder = getSteerHolder(session.id)
+    const taken = holder.pending.splice(0)
+    if (taken.length === 0) return {}
+    const text = taken
+      .map(extractSteerText)
+      .filter((t) => t.trim())
+      .join('\n\n')
+    if (!text) {
+      holder.pending.unshift(...taken)
+      return {}
+    }
+    logger.info('Injecting steer into the running turn via PreToolUse hook', {
+      sessionId: session.id,
+      count: taken.length
+    })
+    // Arm the connection's `steer-boundary` (rolls A1a + A2) — fired only when we actually inject.
+    holder.onInjected?.(taken)
+    return {
+      continue: true,
+      hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: wrapSteerReminder(text) }
+    }
+  }
+
   return {
     canUseTool,
-    hooks: { PreToolUse: [{ hooks: [rtkRewriteHook] }] },
-    allowedTools: agent.allowedTools,
+    hooks: { PreToolUse: [{ hooks: [disabledToolHook, dependencyIsolationHook, rtkRewriteHook, steerHook] }] },
+    // `disabled`-exposure tools (incl. WebSearch/WebFetch) come from the declarative
+    // registry; soul/assistant overlays stay until they migrate to per-tool exposure (PR-7).
     disallowedTools: [
-      ...GLOBALLY_DISALLOWED_TOOLS,
-      ...(soulEnabled ? SOUL_MODE_DISALLOWED_TOOLS : []),
-      ...(isAssistant ? ['AskUserQuestion'] : [])
+      ...new Set([
+        ...resolveDisallowedTools({ disabledTools: agent.disabledTools }, conditionContext),
+        ...(soulEnabled ? SOUL_MODE_DISALLOWED_TOOLS : []),
+        ...(isAssistant ? ['AskUserQuestion'] : [])
+      ])
     ],
     toolPolicySnapshot
   }
 }
 
-async function buildSystemPrompt(
+/**
+ * Describe the runtimes the agent's Bash tool can rely on. bun and uv ship
+ * bundled and are always on PATH (extracted at boot into `cherry.bin`); node /
+ * npm / npx / pip are NOT guaranteed to exist, so the model is steered to bun and
+ * uv for running scripts and pulling libraries when it needs to verify logic.
+ *
+ * Only the `bun` binary is bundled (no `bunx` shim), so the model is told to use
+ * `bun x` rather than `bunx`; `uvx` is bundled alongside `uv`. Resolved paths are
+ * stable (fixed install location), so this block is safe inside the warm-query
+ * system-prompt signature — see {@link formatNetworkProbeLine}.
+ */
+async function buildRuntimeContext(): Promise<string> {
+  const [bunPath, uvPath, rgPath] = await Promise.all([getBinaryPath('bun'), getBinaryPath('uv'), getBinaryPath('rg')])
+  return [
+    '## Available Runtimes',
+    'bun and uv are bundled and always on PATH. Use them to pull libraries and write throwaway scripts to verify logic — prefer them over node/npm/npx/pip, which are not guaranteed to be installed.',
+    `- JavaScript / TypeScript — run with \`bun <file>\`, add deps with \`bun install <pkg>\`, run a package with \`bun x <tool>\` (bun: ${bunPath})`,
+    `- Python — run with \`uv run python <file>\`, add deps inline with \`uv run --with <pkg> python <file>\` (ephemeral, no venv needed), run a tool with \`uvx <tool>\` (uv: ${uvPath})`,
+    `- Search — \`rg\` for fast file/content search (ripgrep: ${rgPath})`,
+    'Install dependencies INTO the project (cwd) only. Global installs (`-g`/`--global`, `uv tool install`, `pip install --user`) are blocked to keep tasks isolated — use `bun x` / `uvx` for one-off tools.'
+  ].join('\n')
+}
+
+export async function buildSystemPrompt(
   session: AgentSessionEntity,
   agent: AgentEntity,
   cwd: string
@@ -513,8 +874,9 @@ async function buildSystemPrompt(
   }
 
   // Channel security (still scoped per session — channels link to a session)
-  const linkedChannel = await channelService.findBySessionId(session.id)
+  const linkedChannel = channelService.findBySessionId(session.id)
   const channelSecurityBlock = linkedChannel ? `\n\n${CHANNEL_SECURITY_PROMPT}` : ''
+  const artifactsBlock = `\n\n${REPORT_ARTIFACTS_PROMPT}`
   const langInstruction = getLanguageInstruction()
 
   // Assistant mode
@@ -522,16 +884,23 @@ async function buildSystemPrompt(
     try {
       const context = await buildAssistantContext()
       return instructions ? `${instructions}\n\n${context}` : context
-    } catch {
+    } catch (error) {
+      // Don't silently degrade to generic behavior: a DB/fs/preference read failure here drops the
+      // entire assistant context, so surface it before falling back to the base instructions.
+      logger.error('buildAssistantContext failed; falling back to base instructions', error as Error)
       return instructions
     }
   }
+
+  // Bundled-runtime guidance (bun/uv) so the agent verifies logic with tools that actually exist.
+  // Not added to the assistant path above — it injects its own environment via buildAssistantContext.
+  const runtimeBlock = `\n\n${await buildRuntimeContext()}`
 
   // Soul mode
   if (soulEnabled) {
     const soulPrompt = await promptBuilder.buildSystemPrompt(cwd, agentConfig)
     const userInstructions = instructions ? `\n\n${instructions}` : ''
-    return `${soulPrompt}${userInstructions}${channelSecurityBlock}\n\n${langInstruction}`
+    return `${soulPrompt}${userInstructions}${channelSecurityBlock}${artifactsBlock}${runtimeBlock}\n\n${langInstruction}`
   }
 
   // Standard mode
@@ -539,22 +908,22 @@ async function buildSystemPrompt(
     return {
       type: 'preset',
       preset: 'claude_code',
-      append: `${instructions}${channelSecurityBlock}\n\n${langInstruction}`
+      append: `${instructions}${channelSecurityBlock}${artifactsBlock}${runtimeBlock}\n\n${langInstruction}`
     }
   }
   return {
     type: 'preset',
     preset: 'claude_code',
-    append: `${channelSecurityBlock}\n\n${langInstruction}`
+    append: `${channelSecurityBlock}${artifactsBlock}${runtimeBlock}\n\n${langInstruction}`
   }
 }
 
-export async function buildMcpServers(
+export function buildMcpServers(
   session: AgentSessionEntity,
   agent: AgentEntity,
   soulEnabled: boolean,
   isAssistant: boolean
-): Promise<Record<string, McpServerConfig> | undefined> {
+): Record<string, McpServerConfig> | undefined {
   const mcpList: Record<string, McpServerConfig> = {}
 
   // 1. Agent-configured MCP servers (user-added via UI)
@@ -562,7 +931,7 @@ export async function buildMcpServers(
   if (mcpIds && mcpIds.length > 0) {
     for (const mcpId of mcpIds) {
       try {
-        const sdkServer = await createSdkMcpServerInstance(mcpId)
+        const sdkServer = createSdkMcpServerInstance(mcpId)
         mcpList[mcpId] = { type: 'sdk', name: mcpId, instance: sdkServer }
       } catch (error) {
         logger.error(`Failed to create MCP bridge for ${mcpId}`, { error })
@@ -570,21 +939,38 @@ export async function buildMcpServers(
     }
   }
 
-  // 3. Exa — structured web search via HTTP (free tier, no API key)
-  mcpList.exa = { type: 'http', url: 'https://mcp.exa.ai/mcp' }
+  // 3. Cherry tools
+  mcpList['cherry-tools'] = {
+    type: 'sdk',
+    name: 'cherry-tools',
+    instance: new CherryBuiltinToolsServer().mcpServer
+  }
 
   // 4. Claw — agent autonomy tools (soul mode only). Use `agent.id` instead of
   // `session.agentId` so TS can see the value is non-null after the upstream
   // orphan check in buildClaudeCodeSessionSettings.
   if (soulEnabled) {
-    const sourceChannelId = await resolveSourceChannel(agent.id, session.id)
-    const clawServer = new ClawServer(agent.id, sourceChannelId)
+    const sourceChannelId = resolveSourceChannel(agent.id, session.id)
+    let workspaceSource: AgentSessionWorkspaceSource
+    switch (session.workspace.type) {
+      case AGENT_WORKSPACE_TYPE.USER:
+        workspaceSource = { type: AGENT_WORKSPACE_TYPE.USER, workspaceId: session.workspaceId }
+        break
+      case AGENT_WORKSPACE_TYPE.SYSTEM:
+        workspaceSource = { type: AGENT_WORKSPACE_TYPE.SYSTEM }
+        break
+      default: {
+        const exhaustive: never = session.workspace.type
+        throw new Error(`Unsupported workspace type: ${String(exhaustive)}`)
+      }
+    }
+    const clawServer = new ClawServer(agent.id, workspaceSource, session.workspace.path, sourceChannelId)
     mcpList.claw = { type: 'sdk', name: 'claw', instance: clawServer.mcpServer }
 
     // agent-memory — the FACT.md / JOURNAL.jsonl memory tool the CherryClaw prompt and the
     // workspace bootstrap drive via `mcp__agent-memory__memory`. Without it the documented
     // "log completion" step (and all memory writes) have no backing server.
-    const memoryServer = new WorkspaceMemoryServer(agent.id)
+    const memoryServer = new WorkspaceMemoryServer(agent.id, session.workspace.path)
     mcpList['agent-memory'] = { type: 'sdk', name: 'agent-memory', instance: memoryServer.mcpServer }
 
     logger.debug('Soul Mode: injected claw + agent-memory MCP servers', {
@@ -606,9 +992,62 @@ export async function buildMcpServers(
   return Object.keys(mcpList).length > 0 ? mcpList : undefined
 }
 
-async function resolveSourceChannel(agentId: string, sessionId: string): Promise<string | undefined> {
+function addMcpToolMetadataAlias(
+  metadataByName: Record<string, McpToolDisplayMetadata>,
+  key: string | undefined,
+  metadata: McpToolDisplayMetadata
+): void {
+  if (!key) return
+  metadataByName[key] = metadata
+}
+
+function addMcpToolMetadataAliases(
+  metadataByName: Record<string, McpToolDisplayMetadata>,
+  server: McpServer,
+  tool: McpTool
+): void {
+  const metadata: McpToolDisplayMetadata = {
+    type: 'mcp',
+    serverId: server.id,
+    serverName: server.name,
+    name: tool.name,
+    description: tool.description
+  }
+
+  addMcpToolMetadataAlias(metadataByName, tool.id, metadata)
+  addMcpToolMetadataAlias(metadataByName, `mcp__${server.id}__${tool.name}`, metadata)
+  addMcpToolMetadataAlias(metadataByName, `mcp__${server.id}__${toCamelCase(tool.name)}`, metadata)
+  addMcpToolMetadataAlias(metadataByName, `mcp__${server.name}__${tool.name}`, metadata)
+  addMcpToolMetadataAlias(metadataByName, `mcp__${toCamelCase(server.name)}__${tool.name}`, metadata)
+}
+
+async function buildMcpToolMetadata(agent: AgentEntity): Promise<Record<string, McpToolDisplayMetadata> | undefined> {
+  const mcpIds = agent.mcps
+  if (!mcpIds?.length) return undefined
+
+  const metadataByName: Record<string, McpToolDisplayMetadata> = {}
+  const mcpService = application.get('McpCatalogService')
+
+  for (const mcpId of mcpIds) {
+    try {
+      const server = mcpServerService.findByIdOrName(mcpId)
+      if (!server) continue
+
+      const tools = mcpService.listTools(server.id)
+      for (const tool of tools) {
+        addMcpToolMetadataAliases(metadataByName, server, tool)
+      }
+    } catch (error) {
+      logger.warn('Failed to build MCP tool display metadata', { mcpId, error })
+    }
+  }
+
+  return Object.keys(metadataByName).length > 0 ? metadataByName : undefined
+}
+
+function resolveSourceChannel(agentId: string, sessionId: string): string | undefined {
   try {
-    const channels = await channelService.listChannels({ agentId })
+    const channels = channelService.listChannels({ agentId })
     return channels.find((ch) => ch.sessionId === sessionId)?.id
   } catch {
     return undefined
@@ -616,31 +1055,19 @@ async function resolveSourceChannel(agentId: string, sessionId: string): Promise
 }
 
 /**
- * Auto-approve MCP tools for injected built-in servers.
- * Claw and assistant tools must be in allowedTools for canUseTool to pass them.
+ * Auto-approve allowlist for injected built-in MCP servers. Returns `undefined` for a plain agent
+ * (Claude Code then permits all tools; cherry-tools is auto-approved via the canUseTool prefix).
+ * Soul/assistant agents force an explicit allowlist so their claw/agent-memory/assistant tools pass.
+ * The read-only cherry-tools are listed explicitly (not a wildcard) so the mutating kb_manage tool is
+ * excluded from the SDK pre-approval and routed through per-call approval via canUseTool.
  */
-export function adjustAllowedToolsForMcp(
-  allowedTools: string[] | undefined,
-  soulEnabled: boolean,
-  isAssistant: boolean
-): string[] | undefined {
-  if (!soulEnabled && !isAssistant) return allowedTools
+export function adjustAllowedToolsForMcp(soulEnabled: boolean, isAssistant: boolean): string[] | undefined {
+  if (!soulEnabled && !isAssistant) return undefined
 
-  const result = allowedTools ? [...allowedTools] : []
-
-  if (soulEnabled && !result.includes('mcp__claw__*')) {
-    result.push('mcp__claw__*')
-  }
-
-  if (soulEnabled && !result.includes('mcp__agent-memory__*')) {
-    result.push('mcp__agent-memory__*')
-  }
-
-  if (isAssistant && !result.includes('mcp__assistant__*')) {
-    result.push('mcp__assistant__*')
-  }
-
-  return result.length > 0 ? result : undefined
+  const result = CHERRY_BUILTIN_AUTO_APPROVED_TOOL_NAMES.map(toCherryBuiltinRuntimeName)
+  if (soulEnabled) result.push('mcp__claw__*', 'mcp__agent-memory__*')
+  if (isAssistant) result.push('mcp__assistant__*')
+  return result
 }
 
 function getSettingSources(agent: AgentEntity): Array<'user' | 'project' | 'local'> {

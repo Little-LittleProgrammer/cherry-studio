@@ -13,6 +13,7 @@
 
 import { application } from '@application'
 import { jobScheduleService } from '@data/services/JobScheduleService'
+import { jobService } from '@data/services/JobService'
 import { JobManager } from '@main/core/job/JobManager'
 import type { JobHandler } from '@main/core/job/types'
 import { BaseService } from '@main/core/lifecycle/BaseService'
@@ -23,7 +24,7 @@ import { JOB_ERROR_CODES } from '@shared/data/api/schemas/jobs'
 import { setupTestDatabase } from '@test-helpers/db'
 import { MockMainCacheServiceExport } from '@test-mocks/main/CacheService'
 import { MockMainDbServiceExport } from '@test-mocks/main/DbService'
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Locally augment JobRegistry so test payloads type-check. The dummy entry is
 // removed from the JS surface after compile and never enters production code.
@@ -54,6 +55,20 @@ function makeNoopHandler(): JobHandler {
 const baseTrigger: Trigger = { kind: 'interval', ms: 60_000 }
 const altTrigger: Trigger = { kind: 'interval', ms: 30_000 }
 
+function clearScheduleDisposables(jobManager: JobManager) {
+  const map = (jobManager as unknown as { scheduleDisposables: Map<string, Disposable> }).scheduleDisposables
+  for (const disp of map.values()) disp.dispose()
+  map.clear()
+}
+
+async function waitForImmediateJobsToDrain() {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const active = jobService.list({ status: ['pending', 'running'] })
+    if (active.length === 0) return
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
 describe('JobManager schedule control APIs', () => {
   setupTestDatabase()
   let scheduler: SchedulerService
@@ -76,6 +91,8 @@ describe('JobManager schedule control APIs', () => {
           return scheduler
         case 'JobManager':
           return jobManager
+        case 'PowerService':
+          return { preventSleep: () => ({ dispose: () => {} }) }
       }
       throw new Error(`Unexpected application.get('${name}')`)
     })
@@ -109,9 +126,12 @@ describe('JobManager schedule control APIs', () => {
   // restore the application.get() mockImplementation set in beforeAll,
   // breaking subsequent tests. Each spy below uses .mockRestore() locally.
   beforeEach(() => {
-    const map = (jobManager as unknown as { scheduleDisposables: Map<string, Disposable> }).scheduleDisposables
-    for (const disp of map.values()) disp.dispose()
-    map.clear()
+    clearScheduleDisposables(jobManager)
+  })
+
+  afterEach(async () => {
+    clearScheduleDisposables(jobManager)
+    await waitForImmediateJobsToDrain()
   })
 
   // ----------------------------------------------------------------------
@@ -120,7 +140,7 @@ describe('JobManager schedule control APIs', () => {
 
   describe('by-id', () => {
     it('pauseJobScheduleById returns true for existing, false for missing', async () => {
-      const snap = await jobManager.registerJobSchedule({
+      const snap = jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         trigger: baseTrigger,
         jobInputTemplate: {} as Record<string, unknown>,
@@ -132,19 +152,19 @@ describe('JobManager schedule control APIs', () => {
     })
 
     it('resumeJobScheduleById returns true for existing, false for missing', async () => {
-      const snap = await jobManager.registerJobSchedule({
+      const snap = jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         trigger: baseTrigger,
         jobInputTemplate: {} as Record<string, unknown>,
         catchUpPolicy: { kind: 'skip-missed' }
       })
 
-      expect(await jobManager.resumeJobScheduleById(snap.id)).toBe(true)
-      expect(await jobManager.resumeJobScheduleById('does-not-exist')).toBe(false)
+      expect(jobManager.resumeJobScheduleById(snap.id)).toBe(true)
+      expect(jobManager.resumeJobScheduleById('does-not-exist')).toBe(false)
     })
 
     it('unregisterJobScheduleById returns true for existing, false for missing', async () => {
-      const snap = await jobManager.registerJobSchedule({
+      const snap = jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         trigger: baseTrigger,
         jobInputTemplate: {} as Record<string, unknown>,
@@ -162,7 +182,7 @@ describe('JobManager schedule control APIs', () => {
 
   describe('by-name', () => {
     it('pauseJobSchedule(type, name) resolves and pauses', async () => {
-      await jobManager.registerJobSchedule({
+      jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         name: 'nightly',
         trigger: baseTrigger,
@@ -174,7 +194,7 @@ describe('JobManager schedule control APIs', () => {
     })
 
     it('resumeJobSchedule(type, name) resolves and resumes', async () => {
-      await jobManager.registerJobSchedule({
+      jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         name: 'morning',
         trigger: baseTrigger,
@@ -186,7 +206,7 @@ describe('JobManager schedule control APIs', () => {
     })
 
     it('triggerJobScheduleNow(type, name) returns true for an armed cron-free schedule', async () => {
-      await jobManager.registerJobSchedule({
+      jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         name: 'evening',
         trigger: baseTrigger,
@@ -198,7 +218,7 @@ describe('JobManager schedule control APIs', () => {
     })
 
     it('unregisterJobSchedule(type, name) deletes the row', async () => {
-      const snap = await jobManager.registerJobSchedule({
+      const snap = jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         name: 'to-delete',
         trigger: baseTrigger,
@@ -207,11 +227,11 @@ describe('JobManager schedule control APIs', () => {
       })
 
       expect(await jobManager.unregisterJobSchedule(DUMMY_TYPE, 'to-delete')).toBe(true)
-      expect(await jobScheduleService.getById(snap.id)).toBeNull()
+      expect(jobScheduleService.getById(snap.id)).toBeNull()
     })
 
     it('resolves the singleton when name is omitted on a single-schedule type', async () => {
-      await jobManager.registerJobSchedule({
+      jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         trigger: baseTrigger,
         jobInputTemplate: {} as Record<string, unknown>,
@@ -222,14 +242,14 @@ describe('JobManager schedule control APIs', () => {
     })
 
     it('throws SCHEDULE_NAME_REQUIRED when type has multiple schedules and name is omitted', async () => {
-      await jobManager.registerJobSchedule({
+      jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         name: 'a',
         trigger: baseTrigger,
         jobInputTemplate: {} as Record<string, unknown>,
         catchUpPolicy: { kind: 'skip-missed' }
       })
-      await jobManager.registerJobSchedule({
+      jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         name: 'b',
         trigger: baseTrigger,
@@ -257,7 +277,7 @@ describe('JobManager schedule control APIs', () => {
     }
 
     it('(a) trigger-only + enabled stays true: re-arms once', async () => {
-      const snap = await jobManager.registerJobSchedule({
+      const snap = jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         name: 'case-a',
         trigger: baseTrigger,
@@ -266,14 +286,14 @@ describe('JobManager schedule control APIs', () => {
       })
       const armSpy = vi.spyOn(jobManager as unknown as { armSchedule: (s: unknown) => void }, 'armSchedule')
 
-      const updated = await jobManager.updateJobSchedule(snap.id, { trigger: altTrigger })
+      const updated = jobManager.updateJobSchedule(snap.id, { trigger: altTrigger })
 
       expect(updated?.enabled).toBe(true)
       expect(armSpy).toHaveBeenCalledTimes(1)
     })
 
     it('(b) trigger + enabled false: disposes and does not re-arm', async () => {
-      const snap = await jobManager.registerJobSchedule({
+      const snap = jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         name: 'case-b',
         trigger: baseTrigger,
@@ -282,7 +302,7 @@ describe('JobManager schedule control APIs', () => {
       })
       const armSpy = vi.spyOn(jobManager as unknown as { armSchedule: (s: unknown) => void }, 'armSchedule')
 
-      const updated = await jobManager.updateJobSchedule(snap.id, { trigger: altTrigger, enabled: false })
+      const updated = jobManager.updateJobSchedule(snap.id, { trigger: altTrigger, enabled: false })
 
       expect(updated?.enabled).toBe(false)
       expect(armSpy).not.toHaveBeenCalled()
@@ -290,7 +310,7 @@ describe('JobManager schedule control APIs', () => {
     })
 
     it('(c) enabled-only false→true: re-arms', async () => {
-      const snap = await jobManager.registerJobSchedule({
+      const snap = jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         name: 'case-c',
         trigger: baseTrigger,
@@ -298,18 +318,18 @@ describe('JobManager schedule control APIs', () => {
         catchUpPolicy: { kind: 'skip-missed' }
       })
       // Disable first; this disposes the in-process entry but keeps the row.
-      await jobManager.updateJobSchedule(snap.id, { enabled: false })
+      jobManager.updateJobSchedule(snap.id, { enabled: false })
       expect(getScheduleDisposables().has(snap.id)).toBe(false)
 
       const armSpy = vi.spyOn(jobManager as unknown as { armSchedule: (s: unknown) => void }, 'armSchedule')
-      const updated = await jobManager.updateJobSchedule(snap.id, { enabled: true })
+      const updated = jobManager.updateJobSchedule(snap.id, { enabled: true })
 
       expect(updated?.enabled).toBe(true)
       expect(armSpy).toHaveBeenCalledTimes(1)
     })
 
     it('(d) enabled-only true→false: disposes', async () => {
-      const snap = await jobManager.registerJobSchedule({
+      const snap = jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         name: 'case-d',
         trigger: baseTrigger,
@@ -318,14 +338,14 @@ describe('JobManager schedule control APIs', () => {
       })
       expect(getScheduleDisposables().has(snap.id)).toBe(true)
 
-      const updated = await jobManager.updateJobSchedule(snap.id, { enabled: false })
+      const updated = jobManager.updateJobSchedule(snap.id, { enabled: false })
 
       expect(updated?.enabled).toBe(false)
       expect(getScheduleDisposables().has(snap.id)).toBe(false)
     })
 
     it('(e) neither trigger nor enabled in patch: no re-arm', async () => {
-      const snap = await jobManager.registerJobSchedule({
+      const snap = jobManager.registerJobSchedule({
         type: DUMMY_TYPE,
         name: 'case-e',
         trigger: baseTrigger,
@@ -335,7 +355,7 @@ describe('JobManager schedule control APIs', () => {
       const originalDisp = getScheduleDisposables().get(snap.id)
       const armSpy = vi.spyOn(jobManager as unknown as { armSchedule: (s: unknown) => void }, 'armSchedule')
 
-      const updated = await jobManager.updateJobSchedule(snap.id, { jobInputTemplate: { updated: true } })
+      const updated = jobManager.updateJobSchedule(snap.id, { jobInputTemplate: { updated: true } })
 
       expect(updated?.jobInputTemplate).toEqual({ updated: true })
       expect(armSpy).not.toHaveBeenCalled()
@@ -345,7 +365,7 @@ describe('JobManager schedule control APIs', () => {
     it('returns null when the id does not exist (no re-arm side effects)', async () => {
       const armSpy = vi.spyOn(jobManager as unknown as { armSchedule: (s: unknown) => void }, 'armSchedule')
 
-      const result = await jobManager.updateJobSchedule('does-not-exist', { trigger: altTrigger })
+      const result = jobManager.updateJobSchedule('does-not-exist', { trigger: altTrigger })
 
       expect(result).toBeNull()
       expect(armSpy).not.toHaveBeenCalled()

@@ -1,7 +1,7 @@
 import { Alert, Button } from '@cherrystudio/ui'
 import { useTranslation } from 'react-i18next'
 
-import type { CLI_TOOLS } from '..'
+import type { CLI_TOOLS } from '../cliTools'
 import { CodeHeroIllustrationIcon } from './CodeHeroIllustrationIcon'
 import { CodeToolCard } from './CodeToolCard'
 import type { CodeToolMeta } from './types'
@@ -30,7 +30,7 @@ export function CodeToolGallery({
   const { t } = useTranslation()
 
   return (
-    <div className="relative flex-1 overflow-y-auto bg-background [&::-webkit-scrollbar]:hidden">
+    <div className="relative min-h-0 flex-1 overflow-y-auto bg-background [&::-webkit-scrollbar]:hidden">
       {!isBunInstalled && (
         <Alert
           className="relative mx-4 mt-4 w-auto items-center rounded-xl border-border bg-card px-4 py-3 text-foreground text-sm sm:absolute sm:top-4 sm:right-4 sm:z-20 sm:mx-0 sm:mt-0 sm:whitespace-nowrap"

@@ -1,6 +1,6 @@
 import { dataApiService } from '@data/DataApiService'
 import { useMutation, useQuery } from '@data/hooks/useDataApi'
-import { DataApiError, ErrorCode } from '@shared/data/api'
+import { DataApiError, ErrorCode } from '@shared/data/api/errors'
 import type { Tag } from '@shared/data/types/tag'
 import { useCallback } from 'react'
 
@@ -34,6 +34,39 @@ export function useTagList(): TagListResult {
     error,
     refetch: stableRefetch
   }
+}
+
+export function useRenameTag() {
+  const { trigger } = useMutation('PATCH', '/tags/:id', {
+    refresh: ['/tags', '/assistants']
+  })
+
+  const renameTag = useCallback(
+    (id: string, name: string): Promise<Tag> =>
+      trigger({
+        params: { id },
+        body: { name: name.trim() }
+      }),
+    [trigger]
+  )
+
+  return { renameTag }
+}
+
+export function useDeleteTag() {
+  const { trigger } = useMutation('DELETE', '/tags/:id', {
+    refresh: ['/tags', '/assistants']
+  })
+
+  const deleteTag = useCallback(
+    (id: string): Promise<void> =>
+      trigger({
+        params: { id }
+      }).then(() => undefined),
+    [trigger]
+  )
+
+  return { deleteTag }
 }
 
 /**

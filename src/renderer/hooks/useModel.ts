@@ -10,7 +10,7 @@ import type {
 } from '@shared/data/api/schemas/models'
 import type { Model, UniqueModelId } from '@shared/data/types/model'
 import { createUniqueModelId } from '@shared/data/types/model'
-import { isUndefined, omitBy } from 'lodash'
+import { isUndefined, omitBy } from 'es-toolkit/compat'
 import { useCallback } from 'react'
 import type { SWRConfiguration } from 'swr'
 
@@ -37,7 +37,11 @@ export function useDefaultModel() {
     quickModel,
     translateModel,
     // v2 Model.id is already the UniqueModelId — store it directly.
-    setDefaultModel: (next: { id: UniqueModelId }) => setDefaultModelId(next.id),
+    setDefaultModel: async (next: { id: UniqueModelId }) => {
+      await setDefaultModelId(next.id)
+      if (!quickModelId) await setQuickModelId(next.id)
+      if (!translateModelId) await setTranslateModelId(next.id)
+    },
     setQuickModel: (next: { id: UniqueModelId }) => setQuickModelId(next.id),
     setTranslateModel: (next: { id: UniqueModelId }) => setTranslateModelId(next.id)
   }
@@ -86,6 +90,12 @@ export function useModelMutations() {
     isLoading: isDeleting,
     error: deleteError
   } = useMutation('DELETE', '/models/:uniqueModelId*', { refresh: ['/models'] })
+
+  const {
+    trigger: bulkDeleteTrigger,
+    isLoading: isBulkDeleting,
+    error: bulkDeleteError
+  } = useMutation('DELETE', '/models', { refresh: ['/models'] })
 
   const {
     trigger: updateTrigger,
@@ -140,6 +150,18 @@ export function useModelMutations() {
     [deleteTrigger]
   )
 
+  const deleteModels = useCallback(
+    async (uniqueModelIds: UniqueModelId[]) => {
+      try {
+        await bulkDeleteTrigger({ query: { ids: uniqueModelIds } })
+      } catch (error) {
+        logger.error('Failed to bulk delete models', { count: uniqueModelIds.length, error })
+        throw error
+      }
+    },
+    [bulkDeleteTrigger]
+  )
+
   const updateModel = useCallback(
     async (providerId: string, modelId: string, updates: UpdateModelDto) => {
       try {
@@ -181,6 +203,9 @@ export function useModelMutations() {
     deleteModel,
     isDeleting,
     deleteError,
+    deleteModels,
+    isBulkDeleting,
+    bulkDeleteError,
     updateModel,
     isUpdating,
     updateError,

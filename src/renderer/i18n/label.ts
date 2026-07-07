@@ -5,20 +5,14 @@
  */
 
 import { loggerService } from '@logger'
-import type { BuiltinMcpServerName, BuiltinOcrProviderId } from '@renderer/types'
-import { BuiltinMcpServerNames } from '@renderer/types'
-import type { AgentType } from '@shared/data/types/agent'
-
-import i18n from './index'
-
-const t = i18n.t
+import { type BuiltinMcpServerName, BuiltinMcpServerNames } from '@shared/utils/mcp'
 
 const logger = loggerService.withContext('i18n:label')
 
-const getLabel = (keyMap: Record<string, string>, key: string, fallback?: string) => {
-  const result = keyMap[key]
-  if (result) {
-    return t(result)
+const getLabelKey = (keyMap: Record<string, string>, key: string, fallback?: string) => {
+  const labelKey = keyMap[key]
+  if (labelKey) {
+    return labelKey
   } else {
     logger.error(`Missing key ${key}`)
     return fallback ?? key
@@ -35,9 +29,9 @@ const providerKeyMap = {
   baichuan: 'provider.baichuan',
   'baidu-cloud': 'provider.baidu-cloud',
   burncloud: 'provider.burncloud',
-  cephalon: 'provider.cephalon',
   cherryai: 'provider.cherryai',
   cherryin: 'provider.cherryin',
+  'claude-code': 'provider.claude-code',
   copilot: 'provider.copilot',
   dashscope: 'provider.dashscope',
   deepseek: 'provider.deepseek',
@@ -49,6 +43,7 @@ const providerKeyMap = {
   github: 'provider.github',
   gpustack: 'provider.gpustack',
   grok: 'provider.grok',
+  'grok-cli': 'provider.grok-cli',
   groq: 'provider.groq',
   hunyuan: 'provider.hunyuan',
   hyperbolic: 'provider.hyperbolic',
@@ -67,6 +62,7 @@ const providerKeyMap = {
   ovms: 'provider.ovms',
   ollama: 'provider.ollama',
   openai: 'provider.openai',
+  'openai-codex': 'provider.openai-codex',
   openrouter: 'provider.openrouter',
   perplexity: 'provider.perplexity',
   ph8: 'provider.ph8',
@@ -77,7 +73,7 @@ const providerKeyMap = {
   stepfun: 'provider.stepfun',
   'tencent-cloud-ti': 'provider.tencent-cloud-ti',
   together: 'provider.together',
-  tokenflux: 'provider.tokenflux',
+  tokenhub: 'provider.tokenhub',
   vertexai: 'provider.vertexai',
   voyageai: 'provider.voyageai',
   xirang: 'provider.xirang',
@@ -93,7 +89,8 @@ const providerKeyMap = {
   cerebras: 'provider.cerebras',
   mimo: 'provider.mimo',
   'minimax-global': 'provider.minimax-global',
-  zai: 'provider.zai'
+  zai: 'provider.zai',
+  opencode: 'provider.opencode'
 } as const
 
 /**
@@ -105,8 +102,8 @@ const providerKeyMap = {
  *
  * 对于可能处理自定义供应商的情况，使用 getProviderName 或 getFancyProviderName 更安全
  */
-export const getProviderLabel = (id: string): string => {
-  return getLabel(providerKeyMap, id)
+export const getProviderLabelKey = (id: string): string => {
+  return getLabelKey(providerKeyMap, id)
 }
 
 const fileProcessorKeyMap = {
@@ -120,8 +117,8 @@ const fileProcessorKeyMap = {
   'open-mineru': 'provider.open-mineru'
 } as const
 
-export const getFileProcessorLabel = (id: string): string => {
-  return getLabel(fileProcessorKeyMap, id)
+export const getFileProcessorLabelKey = (id: string): string => {
+  return getLabelKey(fileProcessorKeyMap, id)
 }
 
 const backupProgressKeyMap = {
@@ -135,8 +132,8 @@ const backupProgressKeyMap = {
   writing_data: 'backup.progress.writing_data'
 } as const
 
-export const getBackupProgressLabel = (key: string): string => {
-  return getLabel(backupProgressKeyMap, key)
+export const getBackupProgressLabelKey = (key: string): string => {
+  return getLabelKey(backupProgressKeyMap, key)
 }
 
 const restoreProgressKeyMap = {
@@ -152,20 +149,18 @@ const restoreProgressKeyMap = {
   validating: 'restore.progress.validating'
 }
 
-export const getRestoreProgressLabel = (key: string): string => {
-  return getLabel(restoreProgressKeyMap, key)
+export const getRestoreProgressLabelKey = (key: string): string => {
+  return getLabelKey(restoreProgressKeyMap, key)
 }
 
 const titleKeyMap = {
   // TODO: update i18n key
-  store: 'title.store',
   apps: 'title.apps',
   code: 'title.code',
   files: 'title.files',
   home: 'title.home',
   knowledge: 'title.knowledge',
   launchpad: 'title.launchpad',
-  library: 'library.title',
   'mcp-servers': 'title.mcp-servers',
   notes: 'title.notes',
   paintings: 'title.paintings',
@@ -175,8 +170,8 @@ const titleKeyMap = {
   agents: 'agent.sidebar_title'
 } as const
 
-export const getTitleLabel = (key: string): string => {
-  return getLabel(titleKeyMap, key)
+export const getTitleLabelKey = (key: string): string => {
+  return getLabelKey(titleKeyMap, key)
 }
 
 const themeModeKeyMap = {
@@ -185,15 +180,14 @@ const themeModeKeyMap = {
   system: 'settings.theme.system'
 } as const
 
-export const getThemeModeLabel = (key: string): string => {
-  return getLabel(themeModeKeyMap, key)
+export const getThemeModeLabelKey = (key: string): string => {
+  return getLabelKey(themeModeKeyMap, key)
 }
 
 const sidebarIconKeyMap = {
-  assistants: 'assistants.title',
-  agents: 'agent.sidebar_title',
-  store: 'assistants.presets.title',
-  paintings: 'paintings.title',
+  assistants: 'agent.session.group.conversation',
+  agents: 'title.work',
+  paintings: 'title.paintings',
   translate: 'translate.title',
   mini_app: 'miniApp.title',
   knowledge: 'knowledge.title',
@@ -203,8 +197,8 @@ const sidebarIconKeyMap = {
   openclaw: 'openclaw.title'
 } as const
 
-export const getSidebarIconLabel = (key: string): string => {
-  return getLabel(sidebarIconKeyMap, key)
+export const getSidebarIconLabelKey = (key: string): string => {
+  return getLabelKey(sidebarIconKeyMap, key)
 }
 
 const selectionDescriptionKeyMap = {
@@ -213,16 +207,16 @@ const selectionDescriptionKeyMap = {
   windows: 'selection.settings.toolbar.trigger_mode.description_note.windows'
 } as const
 
-export const getSelectionDescriptionLabel = (key: string): string => {
-  return getLabel(selectionDescriptionKeyMap, key)
+export const getSelectionDescriptionLabelKey = (key: string): string => {
+  return getLabelKey(selectionDescriptionKeyMap, key)
 }
 
 const paintingsImageSizeOptionsKeyMap = {
   auto: 'paintings.image_size_options.auto'
 } as const
 
-export const getPaintingsImageSizeOptionsLabel = (key: string): string => {
-  return paintingsImageSizeOptionsKeyMap[key] ? getLabel(paintingsImageSizeOptionsKeyMap, key) : key
+export const getPaintingsImageSizeOptionsLabelKey = (key: string): string => {
+  return paintingsImageSizeOptionsKeyMap[key] ? getLabelKey(paintingsImageSizeOptionsKeyMap, key) : key
 }
 
 const paintingsQualityOptionsKeyMap = {
@@ -232,8 +226,8 @@ const paintingsQualityOptionsKeyMap = {
   medium: 'paintings.quality_options.medium'
 } as const
 
-export const getPaintingsQualityOptionsLabel = (key: string): string => {
-  return getLabel(paintingsQualityOptionsKeyMap, key)
+export const getPaintingsQualityOptionsLabelKey = (key: string): string => {
+  return getLabelKey(paintingsQualityOptionsKeyMap, key)
 }
 
 const paintingsModerationOptionsKeyMap = {
@@ -241,8 +235,8 @@ const paintingsModerationOptionsKeyMap = {
   low: 'paintings.moderation_options.low'
 } as const
 
-export const getPaintingsModerationOptionsLabel = (key: string): string => {
-  return getLabel(paintingsModerationOptionsKeyMap, key)
+export const getPaintingsModerationOptionsLabelKey = (key: string): string => {
+  return getLabelKey(paintingsModerationOptionsKeyMap, key)
 }
 
 const paintingsBackgroundOptionsKeyMap = {
@@ -251,8 +245,8 @@ const paintingsBackgroundOptionsKeyMap = {
   transparent: 'paintings.background_options.transparent'
 } as const
 
-export const getPaintingsBackgroundOptionsLabel = (key: string): string => {
-  return getLabel(paintingsBackgroundOptionsKeyMap, key)
+export const getPaintingsBackgroundOptionsLabelKey = (key: string): string => {
+  return getLabelKey(paintingsBackgroundOptionsKeyMap, key)
 }
 
 const mcpTypeKeyMap = {
@@ -262,21 +256,8 @@ const mcpTypeKeyMap = {
   streamableHttp: 'settings.mcp.types.streamableHttp'
 } as const
 
-export const getMcpTypeLabel = (key: string): string => {
-  return getLabel(mcpTypeKeyMap, key)
-}
-
-const mcpProviderDescriptionKeyMap = {
-  '302ai': 'settings.mcp.sync.providerDescriptions.302ai',
-  bailian: 'settings.mcp.sync.providerDescriptions.bailian',
-  lanyun: 'settings.mcp.sync.providerDescriptions.lanyun',
-  mcprouter: 'settings.mcp.sync.providerDescriptions.mcprouter',
-  modelscope: 'settings.mcp.sync.providerDescriptions.modelscope',
-  tokenflux: 'settings.mcp.sync.providerDescriptions.tokenflux'
-} as const
-
-export const getMcpProviderDescriptionLabel = (key: string): string => {
-  return getLabel(mcpProviderDescriptionKeyMap, key)
+export const getMcpTypeLabelKey = (key: string): string => {
+  return getLabelKey(mcpTypeKeyMap, key)
 }
 
 const miniAppsStatusKeyMap = {
@@ -284,8 +265,8 @@ const miniAppsStatusKeyMap = {
   disabled: 'settings.miniApps.disabled'
 } as const
 
-export const getMiniAppsStatusLabel = (key: string): string => {
-  return getLabel(miniAppsStatusKeyMap, key)
+export const getMiniAppsStatusLabelKey = (key: string): string => {
+  return getLabelKey(miniAppsStatusKeyMap, key)
 }
 
 const httpMessageKeyMap = {
@@ -300,8 +281,8 @@ const httpMessageKeyMap = {
   '504': 'error.http.504'
 } as const
 
-export const getHttpMessageLabel = (key: string): string => {
-  return getLabel(httpMessageKeyMap, key)
+export const getHttpMessageLabelKey = (key: string): string => {
+  return getLabelKey(httpMessageKeyMap, key)
 }
 
 const fileFieldKeyMap = {
@@ -310,8 +291,8 @@ const fileFieldKeyMap = {
   name: 'files.name'
 } as const
 
-export const getFileFieldLabel = (key: string): string => {
-  return getLabel(fileFieldKeyMap, key)
+export const getFileFieldLabelKey = (key: string): string => {
+  return getLabelKey(fileFieldKeyMap, key)
 }
 
 const builtInMcpDescriptionKeyMap: Record<BuiltinMcpServerName, string> = {
@@ -330,25 +311,6 @@ const builtInMcpDescriptionKeyMap: Record<BuiltinMcpServerName, string> = {
   [BuiltinMcpServerNames.hub]: 'settings.mcp.builtinServersDescriptions.hub'
 } as const
 
-export const getBuiltInMcpServerDescriptionLabel = (key: string): string => {
-  return getLabel(builtInMcpDescriptionKeyMap, key, t('settings.mcp.builtinServersDescriptions.no'))
-}
-
-const builtinOcrProviderKeyMap = {
-  system: 'ocr.builtin.system',
-  tesseract: '',
-  paddleocr: '',
-  ovocr: ''
-} as const satisfies Record<BuiltinOcrProviderId, string>
-
-export const getBuiltinOcrProviderLabel = (key: BuiltinOcrProviderId) => {
-  if (key === 'tesseract') return 'Tesseract'
-  else if (key == 'paddleocr') return 'PaddleOCR'
-  else if (key == 'ovocr') return 'Intel OV(NPU) OCR'
-  else return getLabel(builtinOcrProviderKeyMap, key)
-}
-
-// oxlint-disable-next-line no-unused-vars -- placeholder for future agent type labels
-export const getAgentTypeLabel = (_key: AgentType) => {
-  return 'Agent'
+export const getBuiltInMcpServerDescriptionLabelKey = (key: string): string => {
+  return getLabelKey(builtInMcpDescriptionKeyMap, key, 'settings.mcp.builtinServersDescriptions.no')
 }

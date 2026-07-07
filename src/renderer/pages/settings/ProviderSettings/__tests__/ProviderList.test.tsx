@@ -2,7 +2,7 @@ import { ENDPOINT_TYPE } from '@shared/data/types/model'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import ProviderList from '../ProviderList'
+import { ProviderList } from '../ProviderList'
 
 const reorderSpy = vi.fn()
 const useProvidersMock = vi.fn()
@@ -286,6 +286,22 @@ describe('ProviderList', () => {
     expect(screen.getByRole('button', { name: '筛选服务商' })).toBeInTheDocument()
   })
 
+  it('places add in the header and filter in the search row', () => {
+    render(<ProviderList selectedProviderId="openai" onSelectProvider={vi.fn()} />)
+
+    const addButton = screen.getByRole('button', { name: /添加/i })
+    const filterButton = screen.getByRole('button', { name: '筛选服务商' })
+    const searchWrap = screen.getByPlaceholderText('搜索模型平台...').closest('div')
+
+    expect(addButton.compareDocumentPosition(filterButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(addButton).toHaveClass('size-7', 'text-primary')
+    expect(searchWrap).toContainElement(filterButton)
+    expect(searchWrap).not.toContainElement(addButton)
+    expect(filterButton).toHaveClass('size-[22px]')
+    expect(filterButton).not.toHaveClass('bg-primary/10')
+    expect(filterButton.querySelector('svg')).toHaveClass('text-muted-foreground/60')
+  })
+
   it('surfaces reorder persistence errors', async () => {
     reorderSpy.mockRejectedValueOnce(new Error('persist failed'))
 
@@ -298,17 +314,36 @@ describe('ProviderList', () => {
     })
   })
 
-  it('applies an external filter hint without making the page own list filter state', () => {
+  it('applies the agent filter hint without hiding gateway-routable providers', () => {
     const onSelectProvider = vi.fn()
+    useProvidersMock.mockReturnValue({
+      providers: [
+        ...providers,
+        {
+          id: 'gemini',
+          name: 'Gemini',
+          presetProviderId: 'gemini',
+          defaultChatEndpoint: ENDPOINT_TYPE.GOOGLE_GENERATE_CONTENT,
+          authType: 'api-key',
+          isEnabled: true
+        }
+      ],
+      createProvider: vi.fn()
+    })
     const { rerender } = render(<ProviderList selectedProviderId="openai" onSelectProvider={onSelectProvider} />)
 
     expect(screen.getByText('OpenAI')).toBeInTheDocument()
     expect(screen.getByText('Anthropic')).toBeInTheDocument()
+    expect(screen.getByText('Gemini')).toBeInTheDocument()
 
     rerender(<ProviderList selectedProviderId="openai" filterModeHint="agent" onSelectProvider={onSelectProvider} />)
 
-    expect(screen.queryByText('OpenAI')).not.toBeInTheDocument()
+    expect(screen.getByText('OpenAI')).toBeInTheDocument()
     expect(screen.getByText('Anthropic')).toBeInTheDocument()
+    expect(screen.queryByText('Gemini')).not.toBeInTheDocument()
+    const filterButton = screen.getByRole('button', { name: '筛选服务商' })
+    expect(filterButton).not.toHaveClass('bg-primary/10')
+    expect(filterButton.querySelector('svg')).toHaveClass('text-primary!')
   })
 
   it('shows management actions for preset-derived and custom providers but not canonical presets', () => {

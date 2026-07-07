@@ -80,6 +80,25 @@ async execute(ctx: JobContext<RemotePollInput>): Promise<RemoteResult> {
 
 Anti-pattern: `while (true)` (cannot be cancelled), `await sleep(N)` without signal (delays cancellation by up to N ms).
 
+## Settled event (`onSettled`)
+
+`onSettled?(event: JobSettledEvent<TPayload>)` fires once when a job reaches a terminal state (errors are caught + logged, never propagated). The event is a projection of the persisted terminal snapshot — no `jobService.getById` reverse lookup needed:
+
+| Field | Type | Notes |
+|---|---|---|
+| `jobId` | `string` | |
+| `type` | `string` | |
+| `scheduleId` | `string \| null` | Set when the job came from a schedule fire |
+| `parentId` | `string \| null` | `opts.parentId` at enqueue; `null` for root jobs |
+| `status` | `'completed' \| 'failed' \| 'cancelled'` | |
+| `input` | `TPayload` | Persisted input payload, typed via the handler registration |
+| `output` | `unknown` (optional) | Handler return value on `completed` |
+| `error` | `JobError \| null` | |
+| `attempt` | `number` | |
+| `metadata` | `Readonly<Record<string, unknown>>` | Final value — includes every `patchMetadata` merge |
+
+`JobContext` exposes the same row-level parent linkage during execution: `ctx.parentId` is `opts.parentId` at enqueue, or `null` for root jobs.
+
 ## 3. Schedule identity: `(type, name)` model
 
 A schedule row in `jobScheduleTable` is identified by the pair `(type, name)`. A `type` can host any number of **named** schedules plus at most one **singleton** (unnamed). The `(type, name)` pair is DB-unique.
@@ -123,6 +142,7 @@ A few invariants govern recovery decisions; the matrix above abstracts over them
 
 - **`singleton` keeps the *newest* row, not the oldest.** Rows are ordered `createdAt DESC`; the head is kept (`running` rows are reset to `pending`), the tail is cancelled. Consequence: a long-running singleton interrupted by a crash will be resumed (after `recovery: 'retry'`/`'singleton'` reset) rather than restarted, while stragglers from earlier runs get cleaned up. There is no "oldest wins" tiebreaker.
 - **`cancelRequested=true` overrides every strategy.** A row with the cancel flag set is always cancelled at startup, regardless of `recovery`, `singleton`, or whether it was running / pending / delayed. This protects against process crashes that interrupted a cancellation in-flight — the user's intent persists across the restart.
+- **In-flight rows are never touched by recovery.** Everything above describes *prior-process* leftovers. A job the **current** process is still executing (tracked in `JobManager.inFlightExecuted`) is excluded before any strategy or the `cancelRequested` override, so it is neither reset/re-dispatched (`retry` / `singleton`) nor cancelled mid-flight (`abandon` / `cancelRequested`) — this prevents a job started during the startup quiet window from running twice (#16291). The exclusion is scoped to the current process: crash leftovers from a previous process are not in that set and recover normally.
 - **`isScheduleOverdue` has three branches** (relevant when picking `catchUpPolicy: 'after-startup'`):
   - **`cron`** triggers compare `nextRun ≤ now()` from the persisted column.
   - **`interval`** triggers compare `lastRun + intervalMs ≤ now()` (SchedulerService does not maintain `nextRun` for interval schedules — `lastRun` is the canonical anchor).

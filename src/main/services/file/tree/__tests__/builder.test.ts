@@ -2,10 +2,28 @@ import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import type { TreeMutationEvent } from '@shared/file/types'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { TreeMutationEvent } from '@shared/utils/file'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createDirectoryTree, type DirectoryTreeBuilder } from '../builder'
+import { tryTestRipgrepPath } from './ripgrepTestUtils'
+
+// Production resolves ripgrep via BinaryManager (`getBinaryPath('rg')`), which
+// reads cherry.bin / mise shims — neither is populated under vitest. Point it
+// at the test ripgrep binary so the underlying directory scan spawns a real ripgrep.
+vi.mock('@main/utils/binaryResolver', async () => {
+  const { tryTestRipgrepPath: tryPath } = await import('./ripgrepTestUtils')
+  const resolvedRgPath = tryPath() ?? '/nonexistent/rg'
+  return {
+    getBinaryPath: async (name?: string) => (name === 'rg' ? resolvedRgPath : (name ?? ''))
+  }
+})
+
+vi.mock('@main/utils/binaryEnv', () => ({
+  getBinaryExecutionEnv: () => ({})
+}))
+
+const ripgrepAvailable = tryTestRipgrepPath() !== null
 
 const waitForEvent = (
   builder: DirectoryTreeBuilder,
@@ -27,7 +45,7 @@ const waitForEvent = (
   })
 }
 
-describe('createDirectoryTree — initial scan', () => {
+describe.skipIf(!ripgrepAvailable)('createDirectoryTree — initial scan', () => {
   let tmp: string
   beforeEach(async () => {
     tmp = await mkdtemp(path.join(tmpdir(), 'cherry-tree-scan-'))
@@ -159,7 +177,7 @@ describe('createDirectoryTree — initial scan', () => {
   })
 })
 
-describe('createDirectoryTree — watcher mutations', () => {
+describe.skipIf(!ripgrepAvailable)('createDirectoryTree — watcher mutations', () => {
   let tmp: string
   beforeEach(async () => {
     tmp = await mkdtemp(path.join(tmpdir(), 'cherry-tree-watch-'))
@@ -426,17 +444,17 @@ describe('createDirectoryTree — watcher mutations', () => {
   })
 })
 
-describe('createDirectoryTree — DB isolation', () => {
+describe.skipIf(!ripgrepAvailable)('createDirectoryTree — DB isolation', () => {
   it('the tree primitive does not import @main/data', async () => {
     // Import-graph proxy: a regex over the source files. The classes live
-    // in `src/shared/file/types/tree.ts` and the main-side primitive
+    // in `src/shared/utils/file/tree.ts` and the main-side primitive
     // is split across `builder.ts` / `DirectoryTreeManager.ts`. None of
     // them may pull anything from `@main/data`.
     const { readFile } = await import('node:fs/promises')
     const builderSource = await readFile(new URL('../builder.ts', import.meta.url), 'utf8')
     const managerSource = await readFile(new URL('../DirectoryTreeManager.ts', import.meta.url), 'utf8')
     const sharedTreeSource = await readFile(
-      new URL('../../../../../shared/file/types/tree.ts', import.meta.url),
+      new URL('../../../../../shared/utils/file/tree.ts', import.meta.url),
       'utf8'
     )
     for (const src of [builderSource, managerSource, sharedTreeSource]) {

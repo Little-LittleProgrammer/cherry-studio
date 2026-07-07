@@ -14,14 +14,19 @@ import {
 import { loggerService } from '@logger'
 import { providerService } from '@main/data/services/ProviderService'
 import { copilotService } from '@main/services/CopilotService'
+import { defaultAppHeaders } from '@main/utils/http'
 import type { Model } from '@shared/data/types/model'
 import { createUniqueModelId, ENDPOINT_TYPE } from '@shared/data/types/model'
 import type { Provider } from '@shared/data/types/provider'
-import { defaultAppHeaders } from '@shared/utils'
-import { formatApiHost } from '@shared/utils/api'
-import { withoutTrailingSlash } from '@shared/utils/api/utils'
-import { isAIGatewayProvider, isGeminiProvider, isOllamaProvider, isVertexProvider } from '@shared/utils/provider'
-import { SystemProviderIds } from '@types'
+import { formatApiHost, withoutTrailingSlash } from '@shared/utils/api'
+import {
+  isAIGatewayProvider,
+  isGeminiProvider,
+  isOllamaProvider,
+  isVertexProvider,
+  matchesPreset
+} from '@shared/utils/provider'
+import { SystemProviderIds } from '@shared/utils/systemProviderId'
 import * as z from 'zod'
 
 import { defaultHeaders, getBaseUrl } from '../utils/provider'
@@ -165,7 +170,7 @@ const ollamaFetcher: ModelFetcher = {
       .replace(/\/api$/, '')
     const response = await getFromApi({
       url: `${baseUrl}/api/tags`,
-      headers: await defaultHeaders(provider),
+      headers: defaultHeaders(provider),
       responseSchema: OllamaTagsResponseSchema,
       abortSignal: signal
     })
@@ -173,12 +178,26 @@ const ollamaFetcher: ModelFetcher = {
   }
 }
 
+const EXCLUDED_GEMINI_GENERATION_METHODS = ['predictLongRunning', 'bidiGenerateContent'] as const
+
+const EXCLUDED_GEMINI_MODEL_KEYWORDS = ['tts'] as const
+
+function isSupportedGeminiModel(model: z.infer<typeof GeminiModelsResponseSchema>['models'][number]): boolean {
+  const methods = model.supportedGenerationMethods ?? []
+  if (EXCLUDED_GEMINI_GENERATION_METHODS.some((method) => methods.includes(method))) {
+    return false
+  }
+
+  const id = (model.name.startsWith('models/') ? model.name.slice(7) : model.name).toLowerCase()
+  return !EXCLUDED_GEMINI_MODEL_KEYWORDS.some((keyword) => id.includes(keyword))
+}
+
 const geminiFetcher: ModelFetcher = {
   match: (p) => isGeminiProvider(p),
   fetch: async (provider, signal) => {
     let baseUrl = withoutTrailingSlash(getBaseUrl(provider))
     baseUrl = baseUrl.replace(/\/v1(beta)?$/, '')
-    const apiKey = await providerService.getRotatedApiKey(provider.id)
+    const apiKey = providerService.getRotatedApiKey(provider.id)
     // Pass the key via the `x-goog-api-key` header (same as `@ai-sdk/google`'s chat path)
     // instead of the `?key=` query param: on failure `APICallError.url` is logged, which
     // would persist the key into local logs users attach to bug reports.
@@ -188,10 +207,12 @@ const geminiFetcher: ModelFetcher = {
       responseSchema: GeminiModelsResponseSchema,
       abortSignal: signal
     })
-    return dedup(response.models, (m) => m.name).map((m) => {
-      const id = m.name.startsWith('models/') ? m.name.slice(7) : m.name
-      return toModel(id, provider, { name: m.displayName || id, description: m.description })
-    })
+    return dedup(response.models, (m) => m.name)
+      .filter(isSupportedGeminiModel)
+      .map((m) => {
+        const id = m.name.startsWith('models/') ? m.name.slice(7) : m.name
+        return toModel(id, provider, { name: m.displayName || id, description: m.description })
+      })
   }
 }
 
@@ -285,7 +306,7 @@ const vertexFetcher: ModelFetcher = {
 const githubFetcher: ModelFetcher = {
   match: (p) => p.id === SystemProviderIds.github,
   fetch: async (provider, signal) => {
-    const headers = await defaultHeaders(provider)
+    const headers = defaultHeaders(provider)
     const catalogResponse = await getFromApi({
       url: 'https://models.github.ai/catalog/models',
       headers,
@@ -304,18 +325,20 @@ const githubFetcher: ModelFetcher = {
 }
 
 const copilotFetcher: ModelFetcher = {
-  match: (p) => p.id === SystemProviderIds.copilot,
+  match: (p) => matchesPreset(p, SystemProviderIds.copilot),
   fetch: async (provider, signal) => {
-    const headers = {
+    const copilotHeaders = {
       ...COPILOT_DEFAULT_HEADERS,
-      ...(await defaultHeaders(provider)),
       ...provider.settings.extraHeaders
     }
-    const { token } = await copilotService.getToken(null as any, headers)
+    // getToken exchanges the stored GitHub OAuth token for a Copilot session token.
+    // It must NOT carry the provider's `Authorization: Bearer <apiKey>` (added by
+    // defaultHeaders) — GitHub's token endpoint rejects the conflicting header with 401.
+    const { token } = await copilotService.getToken(null as any, copilotHeaders)
     const response = await getFromApi({
       url: `${withoutTrailingSlash(getBaseUrl(provider, ENDPOINT_TYPE.OPENAI_CHAT_COMPLETIONS))}/models`,
       headers: {
-        ...headers,
+        ...copilotHeaders,
         Authorization: `Bearer ${token}`
       },
       responseSchema: CopilotModelsResponseSchema,
@@ -341,7 +364,7 @@ const ovmsFetcher: ModelFetcher = {
     const baseUrl = formatApiHost(withoutTrailingSlash(getBaseUrl(provider)).replace(/\/v1$/, ''), true, 'v1')
     const response = await getFromApi({
       url: `${baseUrl}/config`,
-      headers: await defaultHeaders(provider),
+      headers: defaultHeaders(provider),
       responseSchema: OVMSConfigResponseSchema,
       abortSignal: signal
     })
@@ -358,7 +381,7 @@ const togetherFetcher: ModelFetcher = {
     const baseUrl = formatApiHost(getBaseUrl(provider))
     const response = await getFromApi({
       url: `${baseUrl}/models`,
-      headers: await defaultHeaders(provider),
+      headers: defaultHeaders(provider),
       responseSchema: TogetherModelsResponseSchema,
       abortSignal: signal
     })
@@ -379,7 +402,7 @@ const newApiFetcher: ModelFetcher = {
     const baseUrl = formatApiHost(getBaseUrl(provider))
     const response = await getFromApi({
       url: `${baseUrl}/models`,
-      headers: await defaultHeaders(provider),
+      headers: defaultHeaders(provider),
       responseSchema: NewApiModelsResponseSchema,
       abortSignal: signal
     })
@@ -390,7 +413,7 @@ const newApiFetcher: ModelFetcher = {
 const openRouterFetcher: ModelFetcher = {
   match: (p) => p.id === SystemProviderIds.openrouter,
   fetch: async (provider, signal, options) => {
-    const headers = await defaultHeaders(provider)
+    const headers = defaultHeaders(provider)
     const [modelsResponse, embedModelsResponse] = await Promise.all([
       getFromApi({
         url: 'https://openrouter.ai/api/v1/models',
@@ -419,7 +442,7 @@ const ppioFetcher: ModelFetcher = {
   match: (p) => p.id === SystemProviderIds.ppio,
   fetch: async (provider, signal, options) => {
     const baseUrl = formatApiHost(getBaseUrl(provider))
-    const headers = await defaultHeaders(provider)
+    const headers = defaultHeaders(provider)
     const [chat, embed, reranker] = await Promise.all([
       getFromApi({
         url: `${baseUrl}/models`,
@@ -459,8 +482,8 @@ const aiHubMixFetcher: ModelFetcher = {
   match: (p) => p.id === SystemProviderIds.aihubmix,
   fetch: async (provider, signal) => {
     const response = await getFromApi({
-      url: `https://aihubmix.com/api/v1/models`,
-      headers: await defaultHeaders(provider),
+      url: `${withoutTrailingSlash(getBaseUrl(provider)).replace(/\/v1$/, '')}/api/v1/models`,
+      headers: defaultHeaders(provider),
       responseSchema: AIHubMixModelsResponseSchema,
       abortSignal: signal
     })
@@ -483,7 +506,7 @@ const gatewayFetcher: ModelFetcher = {
     const response = await getFromApi({
       url: `https://ai-gateway.vercel.sh/v3/ai/config`,
       headers: {
-        ...(await defaultHeaders(provider)),
+        ...defaultHeaders(provider),
         'ai-gateway-protocol-version': '0.0.1'
       },
       responseSchema: VercelGatewayModelsResponseSchema,
@@ -499,13 +522,36 @@ const gatewayFetcher: ModelFetcher = {
   }
 }
 
+const EXCLUDED_OPENAI_MODEL_KEYWORDS = ['tts', 'whisper', 'transcribe', 'speech', 'audio', 'realtime', 'sora'] as const
+
+function isSupportedOpenAIModel(modelId: string): boolean {
+  const id = modelId.toLowerCase()
+  return !EXCLUDED_OPENAI_MODEL_KEYWORDS.some((keyword) => id.includes(keyword))
+}
+
+const openAIFetcher: ModelFetcher = {
+  match: (p) => matchesPreset(p, SystemProviderIds.openai),
+  fetch: async (provider, signal) => {
+    const baseUrl = formatApiHost(getBaseUrl(provider))
+    const response = await getFromApi({
+      url: `${baseUrl}/models`,
+      headers: defaultHeaders(provider),
+      responseSchema: OpenAIModelsResponseSchema,
+      abortSignal: signal
+    })
+    return dedup(response.data, (m) => m.id)
+      .filter((m) => isSupportedOpenAIModel(m.id))
+      .map((m) => toModel(m.id, provider, { ownedBy: m.owned_by }))
+  }
+}
+
 const openAICompatibleFetcher: ModelFetcher = {
   match: () => true,
   fetch: async (provider, signal) => {
     const baseUrl = formatApiHost(getBaseUrl(provider))
     const response = await getFromApi({
       url: `${baseUrl}/models`,
-      headers: await defaultHeaders(provider),
+      headers: defaultHeaders(provider),
       responseSchema: OpenAIModelsResponseSchema,
       abortSignal: signal
     })
@@ -528,6 +574,7 @@ const fetchers: ModelFetcher[] = [
   openRouterFetcher,
   ppioFetcher,
   gatewayFetcher,
+  openAIFetcher,
   openAICompatibleFetcher // always-match fallback, must be last
 ]
 

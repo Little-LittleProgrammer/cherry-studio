@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { PortalContainerProvider } from '@cherrystudio/ui/components/primitives/portal-container'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import * as React from 'react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
@@ -175,6 +176,20 @@ describe('PageSidePanel', () => {
   })
 
   describe('placement', () => {
+    function ScopedPanel() {
+      const [container, setContainer] = React.useState<HTMLDivElement | null>(null)
+
+      return (
+        <div data-testid="page-shell">
+          <div ref={setContainer} data-testid="panel-root">
+            <PortalContainerProvider container={container}>
+              <PageSidePanel open={true} onClose={vi.fn()} />
+            </PortalContainerProvider>
+          </div>
+        </div>
+      )
+    }
+
     it('uses the design shell classes by default', () => {
       render(
         <PageSidePanel open={true} onClose={vi.fn()} header={<span>Panel title</span>}>
@@ -208,6 +223,34 @@ describe('PageSidePanel', () => {
       expect(container.querySelector('[data-slot="page-side-panel"]')).not.toBeInTheDocument()
       expect(document.body.querySelector('[data-slot="page-side-panel"]')).toBeInTheDocument()
       expect(document.body.querySelector('[data-slot="page-side-panel-backdrop"]')).toBeInTheDocument()
+    })
+
+    it('uses fixed positioning when portaled to document.body', () => {
+      render(<PageSidePanel open={true} onClose={vi.fn()} />)
+
+      expect(document.querySelector('[data-slot="page-side-panel-backdrop"]')).toHaveClass('fixed')
+      expect(screen.getByRole('dialog')).toHaveClass('fixed')
+    })
+
+    it('portals into a provided page side panel container', async () => {
+      const { container } = render(<ScopedPanel />)
+
+      const root = screen.getByTestId('panel-root')
+      await waitFor(() => expect(root.querySelector('[data-slot="page-side-panel"]')).toBeInTheDocument())
+      const panel = root.querySelector('[data-slot="page-side-panel"]')
+      const backdrop = root.querySelector('[data-slot="page-side-panel-backdrop"]')
+      expect(container).toContainElement(root)
+      expect(panel).toBeInTheDocument()
+      expect(backdrop).toBeInTheDocument()
+      expect(panel?.parentElement).toBe(root)
+      expect(backdrop?.parentElement).toBe(root)
+    })
+
+    it('uses absolute positioning when portaled into a provided container', async () => {
+      render(<ScopedPanel />)
+
+      await waitFor(() => expect(screen.getByRole('dialog')).toHaveClass('absolute'))
+      expect(document.querySelector('[data-slot="page-side-panel-backdrop"]')).toHaveClass('absolute')
     })
 
     it('applies design inset classes by default', () => {

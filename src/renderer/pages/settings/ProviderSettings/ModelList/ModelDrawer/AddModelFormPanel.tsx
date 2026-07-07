@@ -1,7 +1,7 @@
 import { Button } from '@cherrystudio/ui'
 import { useModelMutations, useModels } from '@renderer/hooks/useModel'
 import { useProvider } from '@renderer/hooks/useProvider'
-import { getDefaultGroupName } from '@renderer/utils'
+import { getDefaultGroupName } from '@renderer/utils/naming'
 import { ENDPOINT_TYPE } from '@shared/data/types/model'
 import { isNewApiProvider } from '@shared/utils/provider'
 import { ChevronDown, ChevronUp } from 'lucide-react'
@@ -210,7 +210,7 @@ export default function AddModelFormPanel({
     <form
       id={formId}
       data-testid={dataTestId}
-      className={drawerClasses.form}
+      className="flex min-h-0 flex-col gap-4 py-0"
       onSubmit={(event) => void handleFormSubmit(event)}>
       <ProviderSection className={drawerClasses.section}>
         <div className={drawerClasses.fieldList}>
@@ -232,7 +232,7 @@ export default function AddModelFormPanel({
       <ProviderActions>
         <Button
           type="button"
-          variant="outline"
+          variant="ghost"
           className={drawerClasses.toggleButton}
           onClick={() => setShowMoreSettings((current) => !current)}>
           {t('settings.moresetting.label')}

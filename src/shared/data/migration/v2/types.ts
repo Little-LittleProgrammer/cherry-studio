@@ -3,16 +3,7 @@
  */
 
 // Migration stages for UI flow
-export type MigrationStage =
-  | 'version_incompatible'
-  | 'introduction'
-  | 'backup_required'
-  | 'backup_progress'
-  | 'backup_confirmed'
-  | 'migration'
-  | 'migration_completed'
-  | 'completed'
-  | 'error'
+export type MigrationStage = 'version_incompatible' | 'introduction' | 'migration' | 'completed' | 'error'
 
 // Individual migrator status
 export type MigratorStatus = 'pending' | 'running' | 'completed' | 'failed'
@@ -31,6 +22,15 @@ export interface I18nMessage {
   params?: Record<string, string | number>
 }
 
+// Completion-screen summary stats (display metadata only, derived on success)
+export interface MigrationSummary {
+  completedMigrators: number
+  totalMigrators: number
+  itemsProcessed: number
+  /** Migration-stage visible duration shown on the completion screen */
+  durationMs: number
+}
+
 // Overall migration progress
 export interface MigrationProgress {
   stage: MigrationStage
@@ -40,6 +40,10 @@ export interface MigrationProgress {
   i18nMessage?: I18nMessage
   migrators: MigratorProgress[]
   error?: string
+  /** Non-fatal diagnostics aggregated across migrators, surfaced on the completion screen */
+  warnings?: string[]
+  /** Completion-screen summary stats; written only on successful completion */
+  summary?: MigrationSummary
 }
 
 // Prepare phase result
@@ -56,6 +60,8 @@ export interface ExecuteResult {
   success: boolean
   processedCount: number
   error?: string
+  /** Non-fatal diagnostics recorded during execute (e.g. files kept but not reindexable) */
+  warnings?: string[]
 }
 
 // Validation error detail
@@ -88,6 +94,8 @@ export interface MigratorResult {
   recordsProcessed: number
   duration: number
   error?: string
+  /** Non-fatal diagnostics from prepare + execute, surfaced in the migration report */
+  warnings?: string[]
 }
 
 // Overall migration result
@@ -129,10 +137,9 @@ export const MigrationIpcChannels = {
 
   // Flow control
   Start: 'migration:start',
-  ProceedToBackup: 'migration:proceed-to-backup',
-  ShowBackupDialog: 'migration:show-backup-dialog',
-  BackupCompleted: 'migration:backup-completed',
   StartMigration: 'migration:start-migration',
+  // Renderer-local failure mirrored to main's terminal error stage.
+  ReportError: 'migration:report-error',
   Retry: 'migration:retry',
   Cancel: 'migration:cancel',
   Restart: 'migration:restart',
@@ -142,6 +149,16 @@ export const MigrationIpcChannels = {
 
   // Skip migration (version incompatible — user chose to use defaults)
   SkipMigration: 'migration:skip-migration',
+
+  // Window controls (Renderer -> Main)
+  Minimize: 'migration:minimize',
+  CloseWindow: 'migration:close-window',
+  // In-flow close confirmation: Main asks the renderer to show its in-app dialog
+  // (ConfirmClose); the renderer reports a confirmed quit back (ConfirmQuit), or that the
+  // dialog was dismissed without quitting (CancelClose) so Main drops its pending-close flag.
+  ConfirmClose: 'migration:confirm-close',
+  ConfirmQuit: 'migration:confirm-quit',
+  CancelClose: 'migration:cancel-close',
 
   // Progress broadcast (Main -> Renderer)
   Progress: 'migration:progress',

@@ -214,10 +214,13 @@ Use verb-based paths for operations that don't fit CRUD semantics:
 
 | Purpose | Pattern | Example |
 |---------|---------|---------|
-| Pagination | `page` + `limit` | `?page=1&limit=20` |
-| Sorting | `orderBy` + `order` | `?orderBy=createdAt&order=desc` |
+| Pagination (offset) | `page` + `limit` | `?page=1&limit=20` |
+| Pagination (cursor) | `cursor` + `limit` | `?cursor=1700000000000:abc&limit=20` |
+| Sorting | `sortBy` + `sortOrder` (see `SortParams` in [api-types.md](api-types.md)) | `?sortBy=createdAt&sortOrder=desc` |
 | Filtering | direct field names | `?status=active&type=chat` |
 | Search | `q` or `search` | `?q=keyword` |
+
+For offset-vs-cursor selection and the `<key>:<id>` cursor wire format, see the [Pagination Guide](./data-pagination-guide.md).
 
 ## Response Status Codes
 
@@ -247,7 +250,7 @@ Use standard HTTP status codes consistently:
 Use the `SuccessStatus` constants to avoid magic numbers:
 
 ```typescript
-import { SuccessStatus } from '@shared/data/api/apiTypes'
+import { SuccessStatus } from '@shared/data/api/types'
 
 SuccessStatus.OK          // 200 - Request succeeded
 SuccessStatus.CREATED     // 201 - Resource created
@@ -293,7 +296,7 @@ The API server automatically infers status codes based on HTTP method:
 Override the default by returning `{ data, status }`:
 
 ```typescript
-import { SuccessStatus } from '@shared/data/api/apiTypes'
+import { SuccessStatus } from '@shared/data/api/types'
 
 '/async-tasks': {
   POST: async ({ body }) => {
@@ -388,7 +391,7 @@ interface SerializedDataApiError {
 Use `DataApiErrorFactory` utilities to create consistent errors:
 
 ```typescript
-import { DataApiErrorFactory, DataApiError } from '@shared/data/api'
+import { DataApiErrorFactory, DataApiError } from '@shared/data/api/errors'
 
 // Using factory methods (recommended)
 throw DataApiErrorFactory.notFound('Topic', id)
@@ -431,7 +434,7 @@ full API contract and the "do not replace pre-validation" discipline note.
 |---------|------|---------|
 | Paths | kebab-case, plural | `/user-settings`, `/topics` |
 | Path params | camelCase | `:topicId`, `:messageId` |
-| Query params | camelCase | `orderBy`, `pageSize` |
+| Query params | camelCase | `sortBy`, `pageSize` |
 | Body fields | camelCase | `createdAt`, `userName` |
 | Error codes | SCREAMING_SNAKE | `NOT_FOUND`, `VALIDATION_ERROR` |
 
@@ -470,7 +473,7 @@ DataApiService is the **data** business-logic layer (persisting and querying rec
 | `POST /backup/start` | Complex workflow orchestration, not CRUD | IPC: `IpcChannel.Backup_Backup` |
 | `POST /auth/login` | OAuth flow, external service integration | IPC: dedicated auth handler |
 | `GET /mcp/tools` | Runtime service query, not persisted data | IPC: `IpcChannel.Mcp_ListTools` |
-| `POST /jobs` (enqueue) / `DELETE /jobs/:id` (cancel) | Workflow command on `JobManager` infrastructure, not CRUD | Business service in main calls `application.get('JobManager').enqueue(...)` / `.cancel(...)`. For renderer-initiated triggering, use a dedicated IPC channel (e.g. `IpcChannel.Knowledge_IndexFile`). Job DataApi is GET-only. |
+| `POST /jobs` (enqueue) / `DELETE /jobs/:id` (cancel) | Workflow command on `JobManager` infrastructure, not CRUD | Business service in main calls `application.get('JobManager').enqueue(...)` / `.cancel(...)`. For renderer-initiated triggering, use a dedicated IpcApi route (e.g. `knowledge.add_items`). Job DataApi is GET-only. |
 
 ### Why Misuse is Harmful
 
@@ -634,4 +637,4 @@ Why the two differ:
 **Implication for reviewers**:
 
 - Don't copy a `${}` template from a cache key into `refresh` options. `refresh: ['/providers/${providerId}/*']` is a bug — the `${}` is left as a literal string, not interpolated. Use template literal backticks (`` `/providers/${providerId}/*` ``) or compute the key in the function-form refresh.
-- Cache same-value writes short-circuit via `lodash.isEqual` (no broadcast, no subscriber fire). DataApi `refresh` has no such short-circuit — each call triggers a refetch.
+- Cache same-value writes short-circuit via `isEqual` from es-toolkit/compat (no broadcast, no subscriber fire). DataApi `refresh` has no such short-circuit — each call triggers a refetch.

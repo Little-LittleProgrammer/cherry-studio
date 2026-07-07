@@ -49,6 +49,7 @@ export interface StreamDoneResult {
   finalMessage?: CherryUIMessage
   status: 'success'
   modelId?: UniqueModelId
+  anchorMessageId?: string
   /** True when all executions in the topic are done. */
   isTopicDone?: boolean
   timings?: TransportTimings
@@ -58,6 +59,7 @@ export interface StreamPausedResult {
   finalMessage?: CherryUIMessage
   status: 'paused'
   modelId?: UniqueModelId
+  anchorMessageId?: string
   isTopicDone?: boolean
   timings?: TransportTimings
 }
@@ -68,6 +70,7 @@ export interface StreamErrorResult {
   finalMessage?: CherryUIMessage
   status: 'error'
   modelId?: UniqueModelId
+  anchorMessageId?: string
   isTopicDone?: boolean
   timings?: TransportTimings
 }
@@ -78,7 +81,7 @@ export interface StreamListener {
   /** Stable id used for dedup, detach-by-match, and logging. */
   readonly id: string
 
-  onChunk(chunk: UIMessageChunk, sourceModelId?: UniqueModelId): void
+  onChunk(chunk: UIMessageChunk, sourceModelId?: UniqueModelId, anchorMessageId?: string): void
   onDone(result: StreamDoneResult): void | Promise<void>
   onPaused(result: StreamPausedResult): void | Promise<void>
   onError(result: StreamErrorResult): void | Promise<void>
@@ -90,7 +93,7 @@ export interface StreamListener {
 
 /**
  * One model's execution within an ActiveStream. Single-model topics have
- * one entry; multi-model (`@gpt-4o @claude-sonnet`) have N entries
+ * one entry; multi-model selections have N entries
  * running independently against the same listeners and siblingsGroupId.
  */
 export interface StreamExecution {
@@ -106,8 +109,9 @@ export interface StreamExecution {
   droppedChunks: number
   /** Latest accumulated snapshot from `readUIMessageStream`. Undefined until the first snapshot lands. */
   finalMessage?: CherryUIMessage
-  /** Set on `tool-approval-request`, cleared on response. Drives the `topic.stream.statuses` cache. */
-  awaitingApproval?: boolean
+  /** Tool-call ids still awaiting human approval, keyed so a sibling tool's output clears only its
+   *  own. Non-empty ⇒ the topic surfaces `awaiting-approval`; drives the `topic.stream.statuses` cache. */
+  pendingApprovalToolCallIds?: Set<string>
   error?: SerializedError
   siblingsGroupId?: number
   /** Resolves when the execution loop terminates. Awaited by `onStop` for graceful shutdown. */
@@ -128,6 +132,8 @@ export interface StreamExecution {
  */
 export interface ActiveStream {
   topicId: string
+  /** Unique per stream lifecycle for renderer-side unread/seen tracking. */
+  turnId: string
   /** Key = `UniqueModelId`. */
   executions: Map<UniqueModelId, StreamExecution>
   /** Shared across all executions. Key = `listener.id`. */
@@ -151,4 +157,11 @@ export interface AiStreamManagerConfig {
   readonly backgroundMode: 'continue' | 'abort'
   /** Per-execution buffer cap; exceeding stops buffering, not streaming. */
   readonly maxBufferChunks: number
+  /**
+   * Idle bound while a tool is awaiting human approval. The normal idle timeout is far too short for
+   * a human, so on `tool-approval-request` the watchdog re-arms to this generous value instead of the
+   * default — bounded so a renderer that never responds (window closed/crashed) can't leave the
+   * stream and its subprocess hanging until app quit.
+   */
+  readonly approvalIdleTimeoutMs: number
 }

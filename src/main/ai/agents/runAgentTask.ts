@@ -1,5 +1,5 @@
 /**
- * Business logic for `agent.task` jobs — owned by `AgentTaskJobHandler`.
+ * Business logic for `agent.task` jobs — owned by `agentTaskJobHandler`.
  *
  * Each fire creates a fresh agent session. Per-fire sessions are recorded in
  * `job.output.sessionId` for audit only — there is no cross-fire session
@@ -10,18 +10,20 @@
  * (`heartbeat.md`, agent memory) instead of session history.
  */
 
+import { application } from '@application'
 import { agentChannelService } from '@data/services/AgentChannelService'
 import { agentService } from '@data/services/AgentService'
 import { agentSessionService } from '@data/services/AgentSessionService'
+import { agentWorkspaceService } from '@data/services/AgentWorkspaceService'
 import { jobScheduleService } from '@data/services/JobScheduleService'
 import { jobService } from '@data/services/JobService'
 import { loggerService } from '@logger'
 import { readHeartbeat } from '@main/ai/agents/cherryclaw/heartbeat'
 import { buildAgentSessionTopicId } from '@main/ai/agentSession/topic'
-import { ChannelAdapterListener, type StreamListener } from '@main/ai/streamManager'
-import { startAgentSessionRun } from '@main/ai/streamManager/api/startAgentSessionRun'
-import { application } from '@main/core/application'
+import { ChannelAdapterListener, startAgentSessionRun, type StreamListener } from '@main/ai/streamManager'
 import type { JobContext } from '@main/core/job/types'
+import { ErrorCode, isDataApiError } from '@shared/data/api/errors'
+import { AGENT_WORKSPACE_TYPE, type AgentSessionWorkspaceSource } from '@shared/data/api/schemas/agentWorkspaces'
 
 const logger = loggerService.withContext('runAgentTask')
 
@@ -32,6 +34,7 @@ export type AgentTaskInput = {
   agentId: string
   prompt: string
   timeoutMinutes: number
+  workspace: AgentSessionWorkspaceSource
 }
 
 export type AgentTaskOutput = {
@@ -62,16 +65,16 @@ function makeRunSignal(
 }
 
 export async function runAgentTask(ctx: JobContext<AgentTaskInput>): Promise<AgentTaskOutput> {
-  const { agentId, prompt, timeoutMinutes } = ctx.input
+  const { agentId, prompt, timeoutMinutes, workspace } = ctx.input
 
   // schedule-fired jobs carry `scheduleId` on the row; manual ad-hoc enqueues
   // (no schedule) degrade gracefully: skip channel notification.
-  const jobSnapshot = await jobService.getById(ctx.jobId)
+  const jobSnapshot = jobService.getById(ctx.jobId)
   const scheduleId = jobSnapshot?.scheduleId ?? null
-  const scheduleSnapshot = scheduleId ? await jobScheduleService.getById(scheduleId) : null
+  const scheduleSnapshot = scheduleId ? jobScheduleService.getById(scheduleId) : null
   const taskName = scheduleSnapshot?.name ?? null
 
-  const agent = await agentService.getAgent(agentId)
+  const agent = agentService.getAgent(agentId)
   if (!agent) {
     throw new Error(`Agent not found: ${agentId}`)
   }
@@ -82,20 +85,40 @@ export async function runAgentTask(ctx: JobContext<AgentTaskInput>): Promise<Age
 
   let effectivePrompt = prompt
 
-  // All heartbeat skip decisions happen BEFORE we create a session — `createSession`
-  // lazily provisions a workspace, so creating one for a fire we're going to drop
-  // accretes a session row (and workspace) every interval. The agent's workspace is
-  // shared across its sessions, so we can read `heartbeat.md` without creating one.
   if (isHeartbeat) {
     if (config.heartbeat_enabled === false) {
       logger.debug('Heartbeat skipped (disabled)', { agentId, scheduleId })
       return { sessionId: null, result: 'Skipped (disabled)' }
     }
-    const workspacePath = await agentSessionService.findAgentWorkspacePath(agentId)
-    if (!workspacePath) {
-      logger.debug('Heartbeat skipped (no workspace)', { agentId, scheduleId })
-      return { sessionId: null, result: 'Skipped (no file)' }
+    switch (workspace.type) {
+      case AGENT_WORKSPACE_TYPE.SYSTEM:
+        logger.debug('Heartbeat skipped (no file)', { agentId, scheduleId })
+        return { sessionId: null, result: 'Skipped (no file)' }
+      case AGENT_WORKSPACE_TYPE.USER:
+        break
+      default: {
+        const exhaustive: never = workspace
+        throw new Error(`Unsupported heartbeat workspace source: ${String(exhaustive)}`)
+      }
     }
+    let workspaceRow: Awaited<ReturnType<typeof agentWorkspaceService.getById>>
+    try {
+      workspaceRow = agentWorkspaceService.getById(workspace.workspaceId)
+    } catch (error) {
+      if (isDataApiError(error) && error.code === ErrorCode.NOT_FOUND) {
+        logger.debug('Heartbeat skipped (workspace deleted)', {
+          agentId,
+          scheduleId,
+          workspaceId: workspace.workspaceId
+        })
+        return { sessionId: null, result: 'Skipped (workspace deleted)' }
+      }
+      throw error
+    }
+    if (workspaceRow.type !== AGENT_WORKSPACE_TYPE.USER) {
+      throw new Error(`Heartbeat workspace must be user-owned: ${workspace.workspaceId}`)
+    }
+    const workspacePath = workspaceRow.path
     const content = await readHeartbeat(workspacePath)
     if (!content) {
       logger.debug('Heartbeat skipped (no heartbeat.md)', { agentId, scheduleId })
@@ -114,9 +137,16 @@ export async function runAgentTask(ctx: JobContext<AgentTaskInput>): Promise<Age
   // Always create a fresh session per fire. Scheduled tasks are discrete
   // invocations; cross-fire session reuse would only carry stale model
   // context. Persistent state lives in workspace files (heartbeat.md, etc.).
-  const session = await agentSessionService.createSession({ agentId, name: taskName ?? 'Scheduled task' })
+  // The session inherits the workspace bound on the task at creation time —
+  // system for regular tasks (the picker defaults there), the validated user
+  // workspace for heartbeats.
+  const session = agentSessionService.create({
+    agentId,
+    name: taskName ?? 'Scheduled task',
+    workspace
+  })
 
-  const subscribedChannels = scheduleId ? await agentChannelService.getSubscribedChannels(scheduleId) : []
+  const subscribedChannels = scheduleId ? agentChannelService.getSubscribedChannels(scheduleId) : []
 
   const channelManager = application.get('ChannelManager')
   const channelListeners: StreamListener[] = subscribedChannels.flatMap((ch) => {

@@ -3,29 +3,37 @@
  */
 
 import {
+  ContentMessageRoleSchema,
   MessageDataSchema,
-  MessageRoleSchema,
   MessageStatsSchema,
   MessageStatusSchema,
   ModelSnapshotSchema
 } from '@shared/data/types/message'
+import { TraceIdSchema } from '@shared/data/types/trace'
 import * as z from 'zod'
 
-import type { CursorPaginationResponse } from '../apiTypes'
+import type { CursorPaginationResponse } from '../types'
 import type { OrderEndpoints } from './_endpointHelpers'
-import { AgentNameAtomSchema } from './agents'
-import { AgentWorkspaceEntitySchema } from './agentWorkspaces'
+import {
+  type AgentSessionWorkspaceSource,
+  AgentSessionWorkspaceSourceSchema,
+  AgentWorkspaceEntitySchema
+} from './agentWorkspaces'
 
 /** Cursor-paginated query for `/agent-sessions/:sessionId/messages`. Walks history
- *  newest-first; an absent `cursor` returns the most recent page, then each
+ *  newest-first; an absent `cursor` returns the most recent page unless
+ *  `messageId` anchors the first page at a known message, then each
  *  `nextCursor` walks one page older. Limit caps at 200 — the renderer
  *  flattens with `useInfiniteFlatItems` and the virtualizer scrolls older
- *  pages in on demand, so per-page size never has to cover a whole session. */
+ *  pages in on demand, so per-page size never has to cover a whole session.
+ *  If `messageId` cannot be resolved inside the session, the endpoint falls
+ *  back to the newest page. */
 export const AGENT_SESSION_MESSAGES_MAX_LIMIT = 200
 export const AGENT_SESSION_MESSAGES_DEFAULT_LIMIT = 50
 
 export const AgentSessionMessagesListQuerySchema = z.strictObject({
   cursor: z.string().optional(),
+  messageId: z.string().min(1).optional(),
   limit: z.coerce.number().int().positive().max(AGENT_SESSION_MESSAGES_MAX_LIMIT).optional()
 })
 export type AgentSessionMessagesListQuery = z.infer<typeof AgentSessionMessagesListQuerySchema>
@@ -35,12 +43,11 @@ export type AgentSessionMessagesListQuery = z.infer<typeof AgentSessionMessagesL
 // ============================================================================
 
 const AgentSessionMessageBaseSchema = z.strictObject({
-  role: MessageRoleSchema,
+  role: ContentMessageRoleSchema,
   data: MessageDataSchema,
   status: MessageStatusSchema,
   modelId: z.string().nullable(),
   modelSnapshot: ModelSnapshotSchema.nullable(),
-  traceId: z.string().nullable(),
   stats: MessageStatsSchema.nullable()
 })
 
@@ -59,13 +66,12 @@ export type AgentSessionMessageEntity = z.infer<typeof AgentSessionMessageEntity
 export const CreateAgentSessionMessageSchema = AgentSessionMessageBaseSchema.pick({
   modelId: true,
   modelSnapshot: true,
-  traceId: true,
   stats: true
 })
   .partial()
   .extend({
     id: z.string().optional(),
-    role: MessageRoleSchema,
+    role: ContentMessageRoleSchema,
     data: MessageDataSchema,
     status: MessageStatusSchema.optional()
   })
@@ -78,13 +84,24 @@ export const CreateAgentSessionMessagesSchema = z.strictObject({
 })
 export type CreateAgentSessionMessagesDto = z.infer<typeof CreateAgentSessionMessagesSchema>
 
+/**
+ * Session name validator. Empty is allowed for an untitled placeholder session,
+ * and the length is capped at 255 — matching topic.name semantics
+ * (`TopicNameEntitySchema`).
+ */
+export const SessionNameEntitySchema = z.string().max(255)
+
 export const AgentSessionEntitySchema = z.strictObject({
   id: z.string(),
   agentId: z.string().nullable(),
-  name: AgentNameAtomSchema,
+  /** May be empty for an untitled placeholder session, matching topic.name semantics. */
+  name: SessionNameEntitySchema,
+  isNameManuallyEdited: z.boolean(),
   description: z.string().optional(),
-  workspaceId: z.string().nullable(),
-  workspace: AgentWorkspaceEntitySchema.nullable(),
+  workspaceId: z.string(),
+  workspace: AgentWorkspaceEntitySchema,
+  /** Container-level OTel trace id — one trace tree per session. */
+  traceId: TraceIdSchema.optional(),
   orderKey: z.string(),
   createdAt: z.string(),
   updatedAt: z.string()
@@ -92,23 +109,32 @@ export const AgentSessionEntitySchema = z.strictObject({
 export type AgentSessionEntity = z.infer<typeof AgentSessionEntitySchema>
 
 // Create requires a real `agentId` — orphans only happen via cascade, never on insert.
-// `workspaceId` is optional at create time — when omitted, the service inherits
-// from the latest sibling session of the same agent, or creates a default workspace.
 export const CreateAgentSessionSchema = z.strictObject({
   agentId: z.string().min(1),
-  name: AgentNameAtomSchema,
+  name: SessionNameEntitySchema,
   description: z.string().optional(),
-  workspaceId: z.string().min(1).optional()
+  workspace: AgentSessionWorkspaceSourceSchema
 })
 export type CreateAgentSessionDto = z.infer<typeof CreateAgentSessionSchema>
 
 export const UpdateAgentSessionSchema = z.strictObject({
-  name: AgentNameAtomSchema.optional(),
+  name: SessionNameEntitySchema.optional(),
+  isNameManuallyEdited: z.boolean().optional(),
   description: z.string().optional(),
   agentId: z.string().min(1).optional()
 })
 
 export type UpdateAgentSessionDto = z.infer<typeof UpdateAgentSessionSchema>
+
+/**
+ * Body for `PUT /agent-sessions/:sessionId/workspace`. Replacing a session's
+ * workspace creates/deletes the backing system workspace row and is only
+ * allowed before any message exists, so it lives on a dedicated sub-resource
+ * rather than the generic PATCH (see api-design-guidelines: complex
+ * side-effects / resource creation → dedicated endpoint).
+ */
+export const SetAgentSessionWorkspaceSchema = AgentSessionWorkspaceSourceSchema
+export type SetAgentSessionWorkspaceDto = AgentSessionWorkspaceSource
 
 /** Query for `GET /agent-sessions` (cursor pagination + optional agent filter). */
 export const ListAgentSessionsQuerySchema = z.strictObject({
@@ -116,7 +142,29 @@ export const ListAgentSessionsQuerySchema = z.strictObject({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().positive().max(200).optional()
 })
-export type ListAgentSessionsQuery = z.infer<typeof ListAgentSessionsQuerySchema>
+export type ListAgentSessionsQueryParams = z.input<typeof ListAgentSessionsQuerySchema>
+export type ListAgentSessionsQuery = z.output<typeof ListAgentSessionsQuerySchema>
+
+export interface DeleteAgentSessionsResult {
+  deletedIds: string[]
+}
+
+export const AGENT_SESSION_DELETE_MAX_IDS = 200
+
+const DeleteAgentSessionsIdsQueryValueSchema = z
+  .string()
+  .transform((value) =>
+    value
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean)
+  )
+  .pipe(z.array(z.string().min(1)).min(1).max(AGENT_SESSION_DELETE_MAX_IDS))
+
+export const DeleteAgentSessionsQuerySchema = z.strictObject({
+  ids: DeleteAgentSessionsIdsQueryValueSchema
+})
+export type DeleteAgentSessionsQueryParams = z.input<typeof DeleteAgentSessionsQuerySchema>
 
 // ============================================================================
 // API Schema definitions
@@ -125,12 +173,24 @@ export type ListAgentSessionsQuery = z.infer<typeof ListAgentSessionsQuerySchema
 export type AgentSessionSchemas = {
   '/agent-sessions': {
     GET: {
-      query?: ListAgentSessionsQuery
+      query?: ListAgentSessionsQueryParams
       response: CursorPaginationResponse<AgentSessionEntity>
     }
     POST: {
       body: CreateAgentSessionDto
       response: AgentSessionEntity
+    }
+    /**
+     * Delete an explicit set of sessions. Missing ids are ignored so overlapping
+     * multi-window deletes remain idempotent; `deletedIds` reports what was
+     * actually removed.
+     *
+     * Cascades: session pins are purged; if a requested session is backed by a
+     * system workspace, that backing workspace row is removed too.
+     */
+    DELETE: {
+      query: DeleteAgentSessionsQueryParams
+      response: DeleteAgentSessionsResult
     }
   }
 
@@ -144,9 +204,32 @@ export type AgentSessionSchemas = {
       body: UpdateAgentSessionDto
       response: AgentSessionEntity
     }
+    /**
+     * Delete one session.
+     *
+     * Cascades: session pins are purged; if the session is backed by a system
+     * workspace, that backing workspace row is removed too.
+     */
     DELETE: {
       params: { sessionId: string }
       response: void
+    }
+  }
+
+  '/agent-sessions/:sessionId/workspace': {
+    /**
+     * Replace the session's workspace. Only permitted while the session has no
+     * messages — once a conversation has started the binding is permanent
+     * (NOT_FOUND if the session is missing, INVALID_OPERATION if it already has
+     * messages).
+     *
+     * Side effects: switching away from a system workspace deletes that backing
+     * row; switching to `{ type: 'system' }` creates a fresh system workspace.
+     */
+    PUT: {
+      params: { sessionId: string }
+      body: SetAgentSessionWorkspaceDto
+      response: AgentSessionEntity
     }
   }
 
@@ -162,6 +245,18 @@ export type AgentSessionSchemas = {
     DELETE: {
       params: { sessionId: string; messageId: string }
       response: void
+    }
+  }
+  '/agents/:agentId/sessions': {
+    /**
+     * Delete every session belonging to an agent (all-or-nothing — missing agent → NOT_FOUND).
+     *
+     * Cascades: session pins are purged; system workspaces backing deleted
+     * sessions are removed too.
+     */
+    DELETE: {
+      params: { agentId: string }
+      response: DeleteAgentSessionsResult
     }
   }
 } & OrderEndpoints<'/agent-sessions'>

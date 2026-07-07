@@ -7,6 +7,8 @@ import { usePullReconcileSubmit } from '../usePullReconcileSubmit'
 const { reconcileTriggerMock } = vi.hoisted(() => ({
   reconcileTriggerMock: vi.fn()
 }))
+const useProviderMock = vi.fn()
+const updateProviderMock = vi.fn()
 
 vi.mock('@data/hooks/useDataApi', () => ({
   useMutation: () => ({
@@ -15,7 +17,11 @@ vi.mock('@data/hooks/useDataApi', () => ({
   })
 }))
 
-vi.mock('../modelSync', () => ({
+vi.mock('@renderer/hooks/useProvider', () => ({
+  useProvider: (...args: any[]) => useProviderMock(...args)
+}))
+
+vi.mock('../../utils/modelSync', () => ({
   toCreateModelDto: (providerId: string, model: Model) => ({
     providerId,
     modelId: model.apiModelId ?? model.id.split('::').at(-1) ?? model.id,
@@ -35,9 +41,17 @@ describe('usePullReconcileSubmit', () => {
   beforeEach(() => {
     reconcileTriggerMock.mockReset()
     reconcileTriggerMock.mockResolvedValue([])
+    useProviderMock.mockReset()
+    updateProviderMock.mockReset()
+    updateProviderMock.mockResolvedValue(undefined)
+    useProviderMock.mockReturnValue({
+      provider: { id: 'cherryin', isEnabled: true },
+      updateProvider: updateProviderMock
+    })
     window.toast = {
       success: vi.fn(),
-      error: vi.fn()
+      error: vi.fn(),
+      warning: vi.fn()
     } as unknown as typeof window.toast
   })
 
@@ -79,6 +93,55 @@ describe('usePullReconcileSubmit', () => {
     expect(onApplyCommitted).toHaveBeenCalled()
     expect(window.toast.success).toHaveBeenCalled()
     expect(window.toast.error).not.toHaveBeenCalled()
+  })
+
+  it('enables a disabled provider when pull reconcile leaves at least one model', async () => {
+    useProviderMock.mockReturnValue({
+      provider: { id: 'cherryin', isEnabled: false },
+      updateProvider: updateProviderMock
+    })
+    reconcileTriggerMock.mockResolvedValueOnce([{ id: 'cherryin::model-0' }])
+    const onApplyCommitted = vi.fn()
+    const { result } = renderHook(() => usePullReconcileSubmit({ providerId: 'cherryin', onApplyCommitted }))
+
+    await act(async () => {
+      await result.current.confirmApply({
+        toAdd: [
+          {
+            id: 'cherryin::model-0',
+            providerId: 'cherryin',
+            apiModelId: 'model-0',
+            name: 'Model 0',
+            capabilities: [],
+            supportsStreaming: true,
+            isEnabled: true,
+            isHidden: false
+          } as Model
+        ],
+        toRemove: []
+      })
+    })
+
+    expect(updateProviderMock).toHaveBeenCalledWith({ isEnabled: true })
+  })
+
+  it('keeps a disabled provider disabled when pull reconcile leaves zero models', async () => {
+    useProviderMock.mockReturnValue({
+      provider: { id: 'cherryin', isEnabled: false },
+      updateProvider: updateProviderMock
+    })
+    reconcileTriggerMock.mockResolvedValueOnce([])
+    const onApplyCommitted = vi.fn()
+    const { result } = renderHook(() => usePullReconcileSubmit({ providerId: 'cherryin', onApplyCommitted }))
+
+    await act(async () => {
+      await result.current.confirmApply({
+        toAdd: [],
+        toRemove: ['cherryin::old-model']
+      })
+    })
+
+    expect(updateProviderMock).not.toHaveBeenCalled()
   })
 
   it('surfaces reconcile failure without committing the drawer', async () => {
@@ -140,5 +203,24 @@ describe('usePullReconcileSubmit', () => {
     expect(onApplyCommitted).not.toHaveBeenCalled()
     expect(window.toast.success).not.toHaveBeenCalled()
     expect(window.toast.error).toHaveBeenCalledWith('settings.models.manage.sync_pull_failed')
+  })
+
+  it('shows a warning toast when models are skipped because they are in use as defaults', async () => {
+    // Models in toRemove that still appear in the reconciled response were
+    // skipped by the server because they are in use as user defaults.
+    reconcileTriggerMock.mockResolvedValueOnce([{ id: 'cherryin::default-model' }])
+    const onApplyCommitted = vi.fn()
+    const { result } = renderHook(() => usePullReconcileSubmit({ providerId: 'cherryin', onApplyCommitted }))
+
+    await act(async () => {
+      await result.current.confirmApply({
+        toAdd: [],
+        toRemove: ['cherryin::default-model', 'cherryin::other-model']
+      })
+    })
+
+    expect(onApplyCommitted).toHaveBeenCalled()
+    expect(window.toast.success).not.toHaveBeenCalled()
+    expect(window.toast.warning).toHaveBeenCalledWith('settings.models.manage.sync_apply_default_in_use')
   })
 })

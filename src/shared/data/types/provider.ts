@@ -98,7 +98,13 @@ const AuthConfigOAuth = z.object({
   clientId: z.string(),
   refreshToken: z.string().optional(),
   accessToken: z.string().optional(),
-  expiresAt: z.number().optional()
+  expiresAt: z.number().optional(),
+  /**
+   * Provider account identifier extracted from the OAuth access token, when the
+   * provider needs it as a request header (e.g. OpenAI Codex's
+   * `chatgpt-account-id`). Not every OAuth provider populates this.
+   */
+  accountId: z.string().optional()
 })
 
 const AuthConfigIamAws = z.object({
@@ -141,6 +147,8 @@ export const AuthConfigSchema = z.discriminatedUnion('type', [
   AuthConfigIamAzure
 ])
 export type AuthConfig = z.infer<typeof AuthConfigSchema>
+/** The OAuth variant of {@link AuthConfig}, narrowed for token-bearing providers. */
+export type OAuthAuthConfig = Extract<AuthConfig, { type: 'oauth' }>
 
 export const ApiFeaturesSchema = CatalogApiFeaturesSchema
 export type ApiFeatures = z.infer<typeof ApiFeaturesSchema>
@@ -161,9 +169,21 @@ export const ProviderWebsitesSchema = z.object({
 export type ProviderWebsites = z.infer<typeof ProviderWebsitesSchema>
 
 export const ProviderSettingsSchema = z.object({
-  // OpenAI / Groq
-  serviceTier: z.string().optional(),
-  verbosity: z.string().optional(),
+  // OpenAI / Groq.
+  //
+  // PATCH semantics for these nullable override fields, applied by `ProviderService.update`'s shallow
+  // merge: key absent = leave the stored value unchanged; `null` = explicitly clear the stored
+  // override; a value = set it. Downstream, `null` and absent produce byte-identical requests
+  // (consumers guard on truthiness / `!= null`), so `null` exists only as the PATCH-level "clear"
+  // marker — the renderer's "off" (null) and "ignore" (absent) options are equivalent on the wire.
+  serviceTier: z.string().nullable().optional(),
+  verbosity: z.string().nullable().optional(),
+  summaryText: z.enum(['auto', 'detailed', 'concise']).nullable().optional(),
+  streamOptions: z
+    .object({
+      includeUsage: z.boolean().optional()
+    })
+    .optional(),
 
   // Azure-specific
   apiVersion: z.string().optional(),
@@ -252,6 +272,20 @@ export const ProviderSchema = z.object({
   >,
   /** Default text generation endpoint type */
   defaultChatEndpoint: EndpointTypeSchema.optional(),
+  /**
+   * Where the model list comes from. `'registry'` providers cannot enumerate
+   * models over an API; the shipped catalog is returned instead. Carried from
+   * the registry; absent/`'api'` for normal providers.
+   */
+  modelListSource: z.enum(['api', 'registry']).optional(),
+  /**
+   * Which credential kinds this provider accepts (`'api-key'` / `'oauth'` /
+   * `'external-cli'`) — a set, since a provider can offer more than one (CherryIN
+   * takes both a user key and an OAuth login). Carried from the registry; absent
+   * ⇒ `['api-key']`. "Login-based" is the derived `!includes('api-key')`. See
+   * {@link isLoginBasedProvider}.
+   */
+  authMethods: z.array(z.enum(['api-key', 'oauth', 'external-cli'])).optional(),
   /** API Keys (without actual key values) */
   apiKeys: z.array(RuntimeApiKeySchema),
   /** Authentication type (no sensitive data) */

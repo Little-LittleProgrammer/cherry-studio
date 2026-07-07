@@ -13,7 +13,7 @@ const { mockStreamPrompt, captured } = vi.hoisted(() => ({
   captured: { opts: undefined as { uniqueModelId?: string; listener?: StreamListener } | undefined }
 }))
 
-vi.mock('@main/core/application', () => ({
+vi.mock('@application', () => ({
   application: {
     get: vi.fn((name: string) =>
       name === 'AiStreamManager' ? { streamPrompt: mockStreamPrompt, abort: vi.fn() } : undefined
@@ -108,6 +108,17 @@ describe('processMessage model-id parsing', () => {
     await expect(
       processMessage({ params: { model: 'gpt-4', messages: [] } as any, inputFormat: 'openai', outputFormat: 'openai' })
     ).rejects.toThrow(/Invalid model format/)
+  })
+
+  it('rejects the managed CherryAI default model', async () => {
+    await expect(
+      processMessage({
+        params: { model: 'cherryai:qwen', messages: [] } as any,
+        inputFormat: 'openai',
+        outputFormat: 'openai'
+      })
+    ).rejects.toThrow(/not available through the API gateway/)
+    expect(mockStreamPrompt).not.toHaveBeenCalled()
   })
 
   it('splits on the first colon for a simple provider:model', async () => {

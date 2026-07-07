@@ -1,4 +1,3 @@
-import { DeleteOutlined, FolderOpenOutlined } from '@ant-design/icons'
 import {
   Button,
   InputGroup,
@@ -9,11 +8,18 @@ import {
   Switch
 } from '@cherrystudio/ui'
 import { usePreference } from '@data/hooks/usePreference'
-import { useTheme } from '@renderer/context/ThemeProvider'
+import {
+  SettingDivider,
+  SettingGroup,
+  SettingHelpText,
+  SettingRow,
+  SettingRowTitle,
+  SettingTitle
+} from '@renderer/components/SettingsPrimitives'
+import { useTheme } from '@renderer/hooks/useTheme'
+import { FolderOpen, Trash2 } from 'lucide-react'
 import type { FC } from 'react'
 import { useTranslation } from 'react-i18next'
-
-import { SettingDivider, SettingGroup, SettingHelpText, SettingRow, SettingRowTitle, SettingTitle } from '..'
 
 const MarkdownExportSettings: FC = () => {
   const { t } = useTranslation()
@@ -78,8 +84,8 @@ const MarkdownExportSettings: FC = () => {
       <SettingDivider />
       <SettingRow>
         <SettingRowTitle>{t('settings.data.markdown_export.path')}</SettingRowTitle>
-        <RowFlex className="w-[315px] items-center gap-1.25">
-          <InputGroup className="h-8 w-[250px]">
+        <RowFlex className="w-78.75 items-center gap-1.25">
+          <InputGroup className="h-8 w-62.5">
             <InputGroupInput
               type="text"
               value={markdownExportPath || ''}
@@ -92,13 +98,13 @@ const MarkdownExportSettings: FC = () => {
                   onClick={handleClearPath}
                   size="icon-sm"
                   className="text-destructive hover:text-destructive">
-                  <DeleteOutlined />
+                  <Trash2 size={14} />
                 </InputGroupButton>
               </InputGroupAddon>
             )}
           </InputGroup>
           <Button onClick={handleSelectFolder} variant="outline" className="h-8">
-            <FolderOpenOutlined />
+            <FolderOpen size={14} />
             {t('settings.data.markdown_export.select')}
           </Button>
         </RowFlex>

@@ -20,7 +20,7 @@ Unified background-job system: typed handlers, DB-driven dispatch, 6-state machi
 
 ```
 job/
-├── JobManager.ts        # @Injectable lifecycle service: enqueue, dispatch, schedule registry, GC
+├── JobManager.ts        # @Injectable lifecycle service: enqueue/enqueueTx, dispatch, schedule registry, GC
 ├── jobRegistry.ts       # Compile-time `interface JobRegistry` — business modules extend via declaration merging
 ├── types.ts             # JobHandler, JobContext, EnqueueOptions, JobHandle, cache key prefixes
 ├── runtime/
@@ -46,10 +46,13 @@ jobManager.registerHandler('my.task', {
 })
 
 await jobManager.enqueue('my.task', { itemId: '42' })
+
+// Atomic with a business write — inside a DbService.withWriteTx callback:
+// jobManager.enqueueTx(tx, 'my.task', { itemId: '42' })
 ```
 
 See [Handler Authoring](../../../../docs/references/job-and-scheduler/handler-authoring.md) for the full handler contract.
 
 ## Renderer Boundary
 
-The renderer observes job state read-only via `useJob` / `useJobProgress` (shared cache + GET `/jobs/:id`). Triggering a job is decided in main by the owning business service, which calls `jobManager.enqueue(...)` directly; renderer-initiated triggering goes through a dedicated IPC channel (e.g. `IpcChannel.Knowledge_IndexFile`). See [overview.md — Renderer-side consumers](../../../../docs/references/job-and-scheduler/overview.md#renderer-side-consumers).
+The renderer observes job state read-only via `useJob` / `useJobProgress` (shared cache + GET `/jobs/:id`). Triggering a job is decided in main by the owning business service, which calls `jobManager.enqueue(...)` directly; renderer-initiated triggering goes through a dedicated IPC route (e.g. the `knowledge.add_items` IpcApi route, whose main handler enqueues the index job). See [overview.md — Renderer-side consumers](../../../../docs/references/job-and-scheduler/overview.md#renderer-side-consumers).

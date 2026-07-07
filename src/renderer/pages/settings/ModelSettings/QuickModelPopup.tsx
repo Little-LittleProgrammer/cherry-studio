@@ -16,13 +16,12 @@ import {
   Textarea
 } from '@cherrystudio/ui'
 import { usePreference } from '@data/hooks/usePreference'
-import { ResetIcon } from '@renderer/components/Icons'
-import { TopView } from '@renderer/components/TopView'
+import ResetIcon from '@renderer/components/icons/ResetIcon'
+import { SettingSubtitle } from '@renderer/components/SettingsPrimitives'
+import { TopView } from '@renderer/components/TopView/TopView'
 import { CircleHelp } from 'lucide-react'
 import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-
-import { SettingSubtitle } from '..'
 
 interface Props {
   resolve: (data: any) => void
@@ -104,7 +103,10 @@ const PopupContainer: React.FC<Props> = ({ resolve }) => {
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && closePopup()}>
-      <DialogContent className="p-6" onPointerDownOutside={(event) => event.preventDefault()}>
+      <DialogContent
+        closeOnOverlayClick={false}
+        className="p-6"
+        onPointerDownOutside={(event) => event.preventDefault()}>
         <DialogHeader>
           <DialogTitle>{t('settings.models.quick_model.setting_title')}</DialogTitle>
         </DialogHeader>

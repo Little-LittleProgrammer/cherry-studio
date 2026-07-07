@@ -1,6 +1,7 @@
 import { modelService } from '@data/services/ModelService'
 import { providerService } from '@data/services/ProviderService'
 import { loggerService } from '@logger'
+import { isManagedCherryAiDefaultModel } from '@shared/data/presets/cherryai'
 import type { Model } from '@shared/data/types/model'
 import type { Provider } from '@shared/data/types/provider'
 
@@ -29,9 +30,9 @@ export interface ModelsFilter {
 }
 
 /** Enabled providers from the data layer (`ProviderService`, not Redux). */
-async function getAvailableProviders(): Promise<Provider[]> {
+function getAvailableProviders(): Provider[] {
   try {
-    return await providerService.list({ enabled: true })
+    return providerService.list({ enabled: true })
   } catch (error) {
     logger.error('Failed to list providers', error as Error)
     return []
@@ -42,7 +43,7 @@ async function getAvailableProviders(): Promise<Provider[]> {
 async function listAllAvailableModels(providers?: Provider[]): Promise<Model[]> {
   try {
     if (!providers) {
-      return await modelService.list({ enabled: true })
+      return modelService.list({ enabled: true })
     }
     const results = await Promise.allSettled(
       providers.map((p) => modelService.list({ providerId: p.id, enabled: true }))
@@ -79,12 +80,17 @@ function transformModelToOpenAi(model: Model, provider?: Provider): ApiModel {
  */
 export async function getModels(filter: ModelsFilter = {}): Promise<ApiModelsResponse> {
   try {
-    const providers = await getAvailableProviders()
+    const providers = getAvailableProviders()
     const models = await listAllAvailableModels(providers)
 
     // Deduplicate by the gateway-addressable id ("providerId:modelId").
     const uniqueModels = new Map<string, ApiModel>()
     for (const model of models) {
+      const apiModelId = model.apiModelId ?? model.id
+      if (isManagedCherryAiDefaultModel(model.providerId, apiModelId)) {
+        continue
+      }
+
       const provider = providers.find((p) => p.id === model.providerId)
       const apiModel = transformModelToOpenAi(model, provider)
       if (!uniqueModels.has(apiModel.id)) {

@@ -101,6 +101,75 @@ Backs every Service's reorder write path and POST-create. Encapsulates the `frac
 - **External imports of `fractional-indexing` are forbidden**: always go through the three generator wrappers above.
 - **Character set is locked to base62** (library default); no `digits` parameter is exposed. Changing the alphabet requires a whole-database migration, and the source-of-truth constant lives at the top of `orderKey.ts`.
 
+### `keysetCursor.ts` — keyset (cursor) pagination codec + predicate
+
+Backs every list endpoint that pages by a `(sortKey, id)` tuple. Owns the `<key>:<id>` wire-format codec and the strict-tuple keyset WHERE predicate, so the tie-break direction and the warn message live in one tested place instead of being hand-rolled (and drifting) per service.
+
+**Exports:**
+
+- `parseCursor<K>(raw, parseKey)` — pure `<key>:<id>` parser; splits on the FIRST `:` (so ids may contain `:`), returns `null` for any unparseable input (absent/empty raw, no separator, empty key, empty id, or a `parseKey` that rejects the key). Shared with `ftsSearch` so list and search parse identically.
+- `encodeCursor(key, id)` — encode a `(key, id)` boundary into `<key>:<id>`; `key` may be a number or a string.
+- `asNumericKey(s)` / `asStringKey(s)` — `parseKey` helpers for numeric (`createdAt`) and string (`orderKey`) sort columns. Both reject the empty string — `asNumericKey` must, because `Number('') === 0` is finite.
+- `decodeListCursor<K>(raw, parseKey, context)` — list-browsing decode: an absent cursor returns `null` (first page, no warn); a malformed cursor warns once with the locked message and falls back to the first page (`null`). `context` is a short caller tag carried in the warn payload.
+- `keysetOrdering(keyCol, idCol, { major, tie })` — returns `{ where(cursor), orderBy }` from one direction spec: `where` builds `after(keyCol) OR (keyCol = cursor.key AND after(idCol))` (`after` is `gt` for `'asc'`, `lt` for `'desc'`); `orderBy` is `[<major> keyCol, <tie> idCol]` ready to spread into `.orderBy(...)`. Both derive from the same `dir`, so the predicate and the ORDER BY cannot drift apart.
+
+**Design boundaries:**
+
+- **Two decode policies, deliberately split**: list browsing warns and falls back to the first page (`decodeListCursor` → `null`), while search throws 422 (`ftsSearch.decodeSearchCursor`). A stale server-issued list token must not lock the renderer; a malformed search cursor is a client contract violation.
+- **Warn message is locked**: `'decodeCursor: cursor unparseable, falling back to first page'` — kept uniform across call sites; the `context` field distinguishes the source.
+- **Single-tuple keyset only**: covers `(key, id)` pagination. Multi-band / sentinel cursors (e.g. `TopicService`'s pin/topic union with a first-page sentinel) cannot be expressed as one `(key, id)` tuple, and their malformed-fallback returns a sentinel rather than `null` — they keep their own codec and must NOT be routed here.
+- **Direction is declared once**: `keysetOrdering` emits both the `where` predicate and the matching `orderBy` from a single `{ major, tie }`, so the WHERE clause and the `ORDER BY` cannot disagree — the classic keyset skip/repeat bug becomes unrepresentable.
+
+**Example:**
+
+```ts
+import { asNumericKey, decodeListCursor, encodeCursor, keysetOrdering } from './utils/keysetCursor'
+
+const ordering = keysetOrdering(table.createdAt, table.id, { major: 'desc', tie: 'asc' })
+const cursor = decodeListCursor(query.cursor, asNumericKey, 'translate-history')
+const conditions: SQL[] = [...filterConditions]
+if (cursor) conditions.push(ordering.where(cursor))
+const rows = await db
+  .select()
+  .from(table)
+  .where(and(...conditions))
+  .orderBy(...ordering.orderBy) // never drifts from ordering.where
+  .limit(limit + 1)
+const nextCursor = hasNext ? encodeCursor(tail.createdAt, tail.id) : undefined
+```
+
+### `ftsSearch.ts` — FTS cursor, filtering, and pagination core
+
+Shared by full-text search services that use SQLite FTS5 trigram tables. It
+owns the common opaque cursor codec, trigram-FTS candidate filtering, literal
+regex revalidation, bounded offset scanning, and next-cursor assembly.
+
+**FTS contract:**
+
+- The caller's SQL must join its FTS5 virtual table aliased as `fts`.
+- The FTS table must be created with `tokenize='trigram'` and expose a
+  `searchable_text` column.
+- The utility builds `fts.searchable_text LIKE ...` conditions and the caller
+  inserts those conditions into its own SQL shape.
+
+**Design boundaries:**
+
+- **Cursor codec is shared**: `decodeSearchCursor` / `encodeSearchCursor` delegate the `<key>:<id>` parsing to `keysetCursor.parseCursor` / `encodeCursor`; this module keeps only the 422-throw policy and the `SearchCursor = { createdAt, id }` shape.
+- **SQL shape stays with the owning service**: callers provide the raw SQL
+  query and row mapper because each domain joins different tables.
+- **Read-only search only**: this utility never writes, opens transactions, or
+  applies domain ownership rules.
+- **Snippet construction is injected**: callers decide how to build display
+  snippets from matched text and terms.
+- **Cursor sort keys are caller-owned**: `mapRow` returns the public item plus
+  the `(createdAt, id)` boundary used to assemble `nextCursor`.
+- **Candidate scans are bounded**: LIKE candidates that fail regex
+  revalidation stop at the configured ceiling and log a warning instead of
+  scanning an entire FTS table for one page.
+- **Role coercion is caller-owned**: role subsets live with the message domain
+  in `@shared/data/types/message`; this generic utility does not know message
+  roles.
+
 ## Criteria for Adding a New Utility
 
 Before adding a new utility to this directory, confirm:

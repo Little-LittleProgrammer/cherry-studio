@@ -28,9 +28,9 @@ import {
   isSupportVerbosityModel
 } from '@shared/utils/model'
 import { isSupportServiceTierProvider, isSupportVerbosityProvider } from '@shared/utils/provider'
-import { SystemProviderIds } from '@types'
+import { SystemProviderIds } from '@shared/utils/systemProviderId'
 import type { JSONValue } from 'ai'
-import { merge } from 'lodash'
+import { merge } from 'es-toolkit/compat'
 import type { OllamaProviderOptions } from 'ollama-ai-provider-v2'
 
 import { getAiSdkProviderId } from '../provider/factory'
@@ -284,7 +284,9 @@ function buildOpenAIProviderOptions(
   const { enableReasoning } = capabilities
   let providerOptions: OpenAIResponsesProviderOptions = {}
   if (enableReasoning) {
-    const reasoningParams = getOpenAIReasoningParams(assistant, model)
+    const reasoningParams = getOpenAIReasoningParams(assistant, model, {
+      summaryText: provider.settings.summaryText
+    })
     providerOptions = {
       ...providerOptions,
       ...reasoningParams,

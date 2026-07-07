@@ -1,6 +1,13 @@
-import { Alert, Button, Scrollbar } from '@cherrystudio/ui'
-import { loggerService } from '@logger'
-import { formatErrorMessageWithPrefix, getErrorMessage } from '@renderer/utils/error'
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+  Alert,
+  Button,
+  Scrollbar
+} from '@cherrystudio/ui'
+import { formatErrorMessageWithPrefix } from '@renderer/utils/error'
 import type { KnowledgeBase } from '@shared/data/types/knowledge'
 import { RotateCcw } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
@@ -8,22 +15,25 @@ import { useTranslation } from 'react-i18next'
 
 import { KnowledgeDialogFooter } from '../../components/KnowledgeDialogLayout'
 import KnowledgePanelShell from '../../components/KnowledgePanelShell'
-import { useKnowledgeRagConfig } from '../../hooks'
-import { getKnowledgeBaseFailureReason, getKnowledgeRagConfigFormState, parseRequiredInteger } from '../../utils'
+import { useEmbeddingDimensions } from '../../hooks/useEmbeddingDimensions'
+import { useKnowledgeRagConfig } from '../../hooks/useKnowledgeRagConfig'
+import { getKnowledgeBaseFailureReason } from '../../utils/error'
+import { getKnowledgeRagConfigFormState } from '../../utils/validate'
 import ChunkingSection from './ChunkingSection'
 import EmbeddingSection from './EmbeddingSection'
 import FileProcessingSection from './FileProcessingSection'
+import RerankSection from './RerankSection'
 import RetrievalSection from './RetrievalSection'
-
-const logger = loggerService.withContext('RagConfigPanel')
 
 export interface KnowledgeRestoreBaseInitialValues {
   embeddingModelId?: string | null
-  dimensions?: number | null
 }
 
 interface RagConfigPanelProps {
   base: KnowledgeBase
+  // Undefined means unknown (e.g. items are still loading) and is treated as
+  // "not empty" so the safer restore flow is offered until it is confirmed 0.
+  itemCount?: number
   onRestoreBase: (base: KnowledgeBase, initialValues?: KnowledgeRestoreBaseInitialValues) => void
 }
 
@@ -50,18 +60,10 @@ const FailedRagConfigPanel = ({ base, onRestoreBase }: RagConfigPanelProps) => {
   )
 }
 
-const ActiveRagConfigPanel = ({ base, onRestoreBase }: RagConfigPanelProps) => {
+const ActiveRagConfigPanel = ({ base, itemCount, onRestoreBase }: RagConfigPanelProps) => {
   const { t } = useTranslation()
-  const {
-    initialValues,
-    embeddingModels,
-    fileProcessorOptions,
-    embeddingModelOptions,
-    rerankModelOptions,
-    searchModeOptions,
-    save,
-    isLoading
-  } = useKnowledgeRagConfig(base)
+  const { initialValues, fileProcessorOptions, save, isLoading } = useKnowledgeRagConfig(base)
+  const { fetchDimensions, isFetchingDimensions } = useEmbeddingDimensions()
   const [values, setValues] = useState(initialValues)
 
   useEffect(() => {
@@ -70,46 +72,48 @@ const ActiveRagConfigPanel = ({ base, onRestoreBase }: RagConfigPanelProps) => {
 
   const formState = useMemo(() => getKnowledgeRagConfigFormState(initialValues, values), [initialValues, values])
   const { validationErrorCodes, isDirty, canSave } = formState
-  const selectedEmbeddingModel = useMemo(
-    () => embeddingModels.find((model) => model.id === values.embeddingModelId),
-    [embeddingModels, values.embeddingModelId]
-  )
-  const [isFetchingDimensions, setIsFetchingDimensions] = useState(false)
-  const embeddingConfigChanged =
-    values.embeddingModelId !== initialValues.embeddingModelId || values.dimensions !== initialValues.dimensions
-
-  const handleRefreshDimensions = async () => {
-    if (!selectedEmbeddingModel) {
-      window.toast.error(t('knowledge.embedding_model_required'))
-      return
-    }
-
-    setIsFetchingDimensions(true)
-    try {
-      const { embeddings } = await window.api.ai.embedMany({
-        uniqueModelId: selectedEmbeddingModel.id,
-        values: ['test']
-      })
-      const dimensions = embeddings[0].length
-      setValues((currentValues) => ({ ...currentValues, dimensions: dimensions.toString() }))
-    } catch (error) {
-      logger.error(t('message.error.get_embedding_dimensions'), error as Error)
-      window.toast.error(t('message.error.get_embedding_dimensions') + '\n' + getErrorMessage(error))
-    } finally {
-      setIsFetchingDimensions(false)
-    }
-  }
+  const embeddingModelChanged = values.embeddingModelId !== initialValues.embeddingModelId
+  // Changing the embedding model re-embeds existing content, so it normally routes
+  // through the restore flow (which auto-detects the new model's dimensions) instead
+  // of a plain save. A base with no items yet has nothing to re-embed, so the change
+  // can be saved in place — itemCount is undefined while unknown/loading, which is
+  // treated as "not empty" so the safer restore flow stays the default.
+  const canSaveEmbeddingModelDirectly = embeddingModelChanged && itemCount === 0
+  const requiresRestore = embeddingModelChanged && !canSaveEmbeddingModelDirectly
+  // Restore only ever reads embeddingModelId (it ignores the rest of the dirty
+  // draft), so it can bypass canSave the way it always could. A direct save
+  // re-submits the whole dirty form, including chunk fields, so it must respect
+  // the same chunk validation as a plain save.
+  const canSubmit = canSave || requiresRestore
 
   const handleSave = async () => {
-    if (!canSave) {
+    if (!canSubmit) {
       return
     }
 
-    if (embeddingConfigChanged) {
-      onRestoreBase(base, {
-        embeddingModelId: values.embeddingModelId,
-        dimensions: parseRequiredInteger(values.dimensions)
-      })
+    if (requiresRestore) {
+      onRestoreBase(base, { embeddingModelId: values.embeddingModelId })
+      return
+    }
+
+    if (canSaveEmbeddingModelDirectly) {
+      let dimensions: number | null = null
+
+      if (values.embeddingModelId) {
+        try {
+          dimensions = await fetchDimensions(values.embeddingModelId)
+        } catch (error) {
+          window.toast.error(formatErrorMessageWithPrefix(error, t('message.error.get_embedding_dimensions')))
+          return
+        }
+      }
+
+      try {
+        await save(values, { embeddingModelId: values.embeddingModelId, dimensions })
+        window.toast.success(t('knowledge.rag.saved'))
+      } catch (error) {
+        window.toast.error(formatErrorMessageWithPrefix(error, t('knowledge.error.failed_to_edit')))
+      }
       return
     }
 
@@ -119,6 +123,10 @@ const ActiveRagConfigPanel = ({ base, onRestoreBase }: RagConfigPanelProps) => {
     } catch (error) {
       window.toast.error(formatErrorMessageWithPrefix(error, t('knowledge.error.failed_to_edit')))
     }
+  }
+
+  const handleEmbeddingModelChange = (embeddingModelId: string | null) => {
+    setValues((currentValues) => ({ ...currentValues, embeddingModelId }))
   }
 
   return (
@@ -133,51 +141,56 @@ const ActiveRagConfigPanel = ({ base, onRestoreBase }: RagConfigPanelProps) => {
             }
           />
 
-          <ChunkingSection
-            chunkSize={values.chunkSize}
-            chunkOverlap={values.chunkOverlap}
-            chunkSizeErrorCode={validationErrorCodes.chunkSize}
-            chunkOverlapErrorCode={validationErrorCodes.chunkOverlap}
-            onChunkSizeChange={(chunkSize) =>
-              setValues((currentValues) => ({ ...currentValues, chunkSize: chunkSize.replace(/\D/g, '') }))
-            }
-            onChunkOverlapChange={(chunkOverlap) =>
-              setValues((currentValues) => ({ ...currentValues, chunkOverlap: chunkOverlap.replace(/\D/g, '') }))
-            }
-          />
-
           <EmbeddingSection
             embeddingModelId={values.embeddingModelId}
-            embeddingModel={selectedEmbeddingModel}
-            embeddingModelOptions={embeddingModelOptions}
-            dimensions={values.dimensions}
-            dimensionsErrorCode={validationErrorCodes.dimensions}
-            isFetchingDimensions={isFetchingDimensions}
-            onEmbeddingModelChange={(embeddingModelId) =>
-              setValues((currentValues) => ({ ...currentValues, embeddingModelId }))
-            }
-            onDimensionsChange={(dimensions) =>
-              setValues((currentValues) => ({ ...currentValues, dimensions: dimensions.replace(/\D/g, '') }))
-            }
-            onRefreshDimensions={handleRefreshDimensions}
+            onEmbeddingModelChange={handleEmbeddingModelChange}
+          />
+
+          <RerankSection
+            rerankModelId={values.rerankModelId}
+            onRerankModelChange={(rerankModelId) => setValues((currentValues) => ({ ...currentValues, rerankModelId }))}
           />
 
           <RetrievalSection
-            searchModeOptions={searchModeOptions}
-            rerankModelOptions={rerankModelOptions}
             documentCount={values.documentCount}
             threshold={values.threshold}
-            searchMode={values.searchMode}
-            hybridAlpha={values.hybridAlpha}
             rerankModelId={values.rerankModelId}
             onDocumentCountChange={(documentCount) =>
               setValues((currentValues) => ({ ...currentValues, documentCount }))
             }
             onThresholdChange={(threshold) => setValues((currentValues) => ({ ...currentValues, threshold }))}
-            onSearchModeChange={(searchMode) => setValues((currentValues) => ({ ...currentValues, searchMode }))}
-            onHybridAlphaChange={(hybridAlpha) => setValues((currentValues) => ({ ...currentValues, hybridAlpha }))}
-            onRerankModelChange={(rerankModelId) => setValues((currentValues) => ({ ...currentValues, rerankModelId }))}
           />
+
+          {/* Chunking knobs are set-and-forget internals, so they live under a
+              collapsed "Advanced" section to keep the essentials on top. */}
+          <Accordion type="single" collapsible>
+            <AccordionItem value="advanced" className="border-border-subtle last:border-b">
+              <AccordionTrigger>{t('common.advanced_settings')}</AccordionTrigger>
+              <AccordionContent className="flex flex-col gap-4">
+                <ChunkingSection
+                  chunkStrategy={values.chunkStrategy}
+                  chunkSeparator={values.chunkSeparator}
+                  chunkSize={values.chunkSize}
+                  chunkOverlap={values.chunkOverlap}
+                  chunkSizeErrorCode={validationErrorCodes.chunkSize}
+                  chunkOverlapErrorCode={validationErrorCodes.chunkOverlap}
+                  chunkSeparatorErrorCode={validationErrorCodes.chunkSeparator}
+                  onChunkStrategyChange={(chunkStrategy) =>
+                    setValues((currentValues) => ({ ...currentValues, chunkStrategy }))
+                  }
+                  onChunkSeparatorChange={(chunkSeparator) =>
+                    setValues((currentValues) => ({ ...currentValues, chunkSeparator }))
+                  }
+                  onChunkSizeChange={(chunkSize) =>
+                    setValues((currentValues) => ({ ...currentValues, chunkSize: chunkSize.replace(/\D/g, '') }))
+                  }
+                  onChunkOverlapChange={(chunkOverlap) =>
+                    setValues((currentValues) => ({ ...currentValues, chunkOverlap: chunkOverlap.replace(/\D/g, '') }))
+                  }
+                />
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
         </div>
       </Scrollbar>
 
@@ -192,8 +205,13 @@ const ActiveRagConfigPanel = ({ base, onRestoreBase }: RagConfigPanelProps) => {
           <RotateCcw />
           {t('knowledge.rag.reset_action')}
         </Button>
-        <Button type="button" variant="emphasis" loading={isLoading} disabled={!canSave} onClick={handleSave}>
-          {embeddingConfigChanged ? t('knowledge.restore.submit') : t('knowledge.rag.save_action')}
+        <Button
+          type="button"
+          variant="emphasis"
+          loading={isLoading || isFetchingDimensions}
+          disabled={!canSubmit}
+          onClick={handleSave}>
+          {requiresRestore ? t('knowledge.restore.submit') : t('knowledge.rag.save_action')}
         </Button>
       </KnowledgeDialogFooter>
     </KnowledgePanelShell>

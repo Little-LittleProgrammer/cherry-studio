@@ -4,56 +4,54 @@
  * Implements all topic-related API endpoints including:
  * - Cursor-paginated topic list with optional name search
  * - Topic CRUD operations
+ * - Topic path duplication
  * - Active node switching for branch navigation
  * - Scoped reorder (single + batch) via OrderEndpoints
  */
 
 import { topicService } from '@data/services/TopicService'
-import { loggerService } from '@logger'
-import { topicNamingService } from '@main/services/TopicNamingService'
-import type { HandlersFor } from '@shared/data/api/apiTypes'
 import { OrderBatchRequestSchema, OrderRequestSchema } from '@shared/data/api/schemas/_endpointHelpers'
 import {
   CreateTopicSchema,
+  DeleteTopicsQuerySchema,
+  DuplicateTopicSchema,
   ListTopicsQuerySchema,
   SetActiveNodeSchema,
   type TopicSchemas,
   UpdateTopicSchema
 } from '@shared/data/api/schemas/topics'
-
-const logger = loggerService.withContext('DataApi:TopicHandlers')
+import type { HandlersFor } from '@shared/data/api/types'
 
 export const topicHandlers: HandlersFor<TopicSchemas> = {
   '/topics': {
     GET: async ({ query }) => {
       const parsed = ListTopicsQuerySchema.parse(query ?? {})
-      return await topicService.listByCursor(parsed)
+      return topicService.listByCursor(parsed)
     },
 
     POST: async ({ body }) => {
       const parsed = CreateTopicSchema.parse(body)
-      const topic = await topicService.create(parsed)
-      if (parsed.sourceNodeId) {
-        void topicNamingService.maybeRenameForkedTopic(topic.id, topic.assistantId).catch((err) => {
-          logger.warn('Failed to auto-name forked topic', { topicId: topic.id, err })
-        })
-      }
-      return topic
+      return topicService.create(parsed)
+    },
+
+    DELETE: async ({ query }) => {
+      const parsed = DeleteTopicsQuerySchema.parse(query)
+      return topicService.deleteByIds(parsed.ids)
     }
   },
 
   '/topics/:id': {
     GET: async ({ params }) => {
-      return await topicService.getById(params.id)
+      return topicService.getById(params.id)
     },
 
     PATCH: async ({ params, body }) => {
       const parsed = UpdateTopicSchema.parse(body)
-      return await topicService.update(params.id, parsed)
+      return topicService.update(params.id, parsed)
     },
 
     DELETE: async ({ params }) => {
-      await topicService.delete(params.id)
+      topicService.delete(params.id)
       return undefined
     }
   },
@@ -61,14 +59,27 @@ export const topicHandlers: HandlersFor<TopicSchemas> = {
   '/topics/:id/active-node': {
     PUT: async ({ params, body }) => {
       const parsed = SetActiveNodeSchema.parse(body)
-      return await topicService.setActiveNode(params.id, parsed.nodeId)
+      return topicService.setActiveNode(params.id, parsed.nodeId)
+    }
+  },
+
+  '/topics/:id/duplicate': {
+    POST: async ({ params, body }) => {
+      const parsed = DuplicateTopicSchema.parse(body)
+      return topicService.duplicate(params.id, parsed)
+    }
+  },
+
+  '/assistants/:assistantId/topics': {
+    DELETE: async ({ params }) => {
+      return topicService.deleteByAssistantId(params.assistantId)
     }
   },
 
   '/topics/:id/order': {
     PATCH: async ({ params, body }) => {
       const parsed = OrderRequestSchema.parse(body)
-      await topicService.reorder(params.id, parsed)
+      topicService.reorder(params.id, parsed)
       return undefined
     }
   },
@@ -76,7 +87,7 @@ export const topicHandlers: HandlersFor<TopicSchemas> = {
   '/topics/order:batch': {
     PATCH: async ({ body }) => {
       const parsed = OrderBatchRequestSchema.parse(body)
-      await topicService.reorderBatch(parsed.moves)
+      topicService.reorderBatch(parsed.moves)
       return undefined
     }
   }

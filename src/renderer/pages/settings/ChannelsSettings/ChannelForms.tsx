@@ -10,7 +10,7 @@ import {
   SelectTrigger,
   SelectValue
 } from '@cherrystudio/ui'
-import type { FeishuChannelConfig, FeishuDomain, PermissionMode } from '@renderer/types'
+import type { FeishuChannelConfig, FeishuDomain, PermissionMode } from '@renderer/types/agent'
 import { QRCodeSVG } from 'qrcode.react'
 import type { ReactNode } from 'react'
 import { type FC, useCallback, useEffect, useState } from 'react'
@@ -324,7 +324,7 @@ export const FeishuForm: FC<ChannelFormProps> = ({ channel, onConfigChange }) =>
           setQrUrl(null)
           if (status === 'pending') setStatus('idle')
         }}>
-        <DialogContent className="max-w-[360px]">
+        <DialogContent closeOnOverlayClick={false} className="max-w-90">
           <DialogHeader>
             <DialogTitle>{t('agent.cherryClaw.channels.feishu.qrTitle')}</DialogTitle>
           </DialogHeader>
@@ -470,7 +470,7 @@ export const WeChatForm: FC<ChannelFormProps & { onRemove?: () => void }> = ({ c
           setQrUrl(null)
           if (status !== 'confirmed' && onRemove) onRemove()
         }}>
-        <DialogContent className="max-w-[360px]">
+        <DialogContent closeOnOverlayClick={false} className="max-w-90">
           <DialogHeader>
             <DialogTitle>{t('agent.cherryClaw.channels.wechat.qrTitle')}</DialogTitle>
           </DialogHeader>

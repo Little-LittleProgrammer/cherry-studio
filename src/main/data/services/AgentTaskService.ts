@@ -11,15 +11,19 @@ import { agentChannelService } from '@data/services/AgentChannelService'
 import { jobScheduleService } from '@data/services/JobScheduleService'
 import { jobService } from '@data/services/JobService'
 import { loggerService } from '@logger'
-import { DataApiErrorFactory } from '@shared/data/api'
+import { DataApiErrorFactory } from '@shared/data/api/errors'
 import type {
   CreateTaskDto,
   ScheduledTaskEntity,
   TaskRunLogEntity,
   UpdateTaskDto
 } from '@shared/data/api/schemas/agents'
+import {
+  type AgentSessionWorkspaceSource,
+  AgentSessionWorkspaceSourceSchema
+} from '@shared/data/api/schemas/agentWorkspaces'
 import type { JobScheduleSnapshot, JobSnapshot, UpdateJobScheduleDto } from '@shared/data/api/schemas/jobs'
-import type { ListOptions } from '@types'
+import type { ListOptions } from '@shared/data/api/types'
 import { eq } from 'drizzle-orm'
 
 const logger = loggerService.withContext('AgentTaskService')
@@ -31,15 +35,22 @@ type AgentTaskJobInputTemplate = {
   agentId: string
   prompt: string
   timeoutMinutes: number
+  workspace: AgentSessionWorkspaceSource
 }
 
-function isAgentTaskTemplate(value: unknown): value is AgentTaskJobInputTemplate {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof (value as AgentTaskJobInputTemplate).agentId === 'string' &&
-    typeof (value as AgentTaskJobInputTemplate).prompt === 'string'
-  )
+function normalizeAgentTaskTemplate(value: unknown): AgentTaskJobInputTemplate | null {
+  if (typeof value !== 'object' || value === null) return null
+
+  const template = value as Partial<AgentTaskJobInputTemplate>
+  if (typeof template.agentId !== 'string' || typeof template.prompt !== 'string') return null
+
+  const parsedWorkspace = AgentSessionWorkspaceSourceSchema.safeParse(template.workspace)
+  return {
+    agentId: template.agentId,
+    prompt: template.prompt,
+    timeoutMinutes: typeof template.timeoutMinutes === 'number' ? template.timeoutMinutes : 2,
+    workspace: parsedWorkspace.success ? parsedWorkspace.data : { type: 'system' }
+  }
 }
 
 function deriveStatus(snapshot: JobScheduleSnapshot): 'active' | 'paused' | 'completed' {
@@ -54,13 +65,14 @@ export class AgentTaskService {
    * (soul_enabled) or bypassPermissions permission mode — otherwise
    * tool calls during task execution will fail with permission errors.
    */
-  private async assertAutonomous(agentId: string): Promise<void> {
+  private assertAutonomous(agentId: string): void {
     const database = application.get('DbService').getDb()
-    const [row] = await database
+    const [row] = database
       .select({ configuration: agentsTable.configuration })
       .from(agentsTable)
       .where(eq(agentsTable.id, agentId))
       .limit(1)
+      .all()
 
     if (!row) {
       throw DataApiErrorFactory.notFound('Agent', agentId)
@@ -78,16 +90,17 @@ export class AgentTaskService {
   }
 
   async createTask(agentId: string, dto: CreateTaskDto): Promise<ScheduledTaskEntity> {
-    await this.assertAutonomous(agentId)
+    this.assertAutonomous(agentId)
 
     const timeoutMinutes = dto.timeoutMinutes ?? 2
     const jobInputTemplate: AgentTaskJobInputTemplate = {
       agentId,
       prompt: dto.prompt,
-      timeoutMinutes
+      timeoutMinutes,
+      workspace: dto.workspace
     }
 
-    const { id } = await application.get('JobManager').registerJobSchedule({
+    const { id } = application.get('JobManager').registerJobSchedule({
       type: AGENT_TASK_TYPE,
       name: dto.name,
       trigger: dto.trigger,
@@ -97,7 +110,7 @@ export class AgentTaskService {
 
     if (dto.channelIds?.length) {
       try {
-        await agentChannelService.replaceTaskSubscriptions(id, dto.channelIds)
+        agentChannelService.replaceTaskSubscriptions(id, dto.channelIds)
       } catch (error) {
         try {
           await application.get('JobManager').unregisterJobScheduleById(id)
@@ -111,31 +124,33 @@ export class AgentTaskService {
       }
     }
 
-    const snapshot = await jobScheduleService.getById(id)
+    const snapshot = jobScheduleService.getById(id)
     if (!snapshot) {
       throw DataApiErrorFactory.invalidOperation('create task', 'schedule disappeared after insert')
     }
 
     logger.info('Task created', { taskId: id, agentId })
-    return await this.toScheduledTaskEntity(snapshot)
+    return this.toScheduledTaskEntity(snapshot)
   }
 
-  async getTask(agentId: string, taskId: string): Promise<ScheduledTaskEntity | null> {
-    const snapshot = await jobScheduleService.getById(taskId)
+  getTask(agentId: string, taskId: string): ScheduledTaskEntity | null {
+    const snapshot = jobScheduleService.getById(taskId)
     if (!snapshot || snapshot.type !== AGENT_TASK_TYPE) return null
-    if (!isAgentTaskTemplate(snapshot.jobInputTemplate) || snapshot.jobInputTemplate.agentId !== agentId) return null
-    return await this.toScheduledTaskEntity(snapshot)
+    const template = normalizeAgentTaskTemplate(snapshot.jobInputTemplate)
+    if (!template || template.agentId !== agentId) return null
+    return this.toScheduledTaskEntity(snapshot)
   }
 
-  async listTasks(
+  listTasks(
     agentId: string,
     options: ListOptions & { includeHeartbeat?: boolean } = {}
-  ): Promise<{ tasks: ScheduledTaskEntity[]; total: number }> {
+  ): { tasks: ScheduledTaskEntity[]; total: number } {
     const { includeHeartbeat = false, limit, offset } = options
-    const all = await jobScheduleService.listAll({ type: AGENT_TASK_TYPE })
+    const all = jobScheduleService.listAll({ type: AGENT_TASK_TYPE })
 
     const filtered = all.filter((s) => {
-      if (!isAgentTaskTemplate(s.jobInputTemplate) || s.jobInputTemplate.agentId !== agentId) return false
+      const template = normalizeAgentTaskTemplate(s.jobInputTemplate)
+      if (!template || template.agentId !== agentId) return false
       if (!includeHeartbeat && s.name === HEARTBEAT_TASK_NAME) return false
       return true
     })
@@ -149,25 +164,27 @@ export class AgentTaskService {
         : sorted
 
     return {
-      tasks: await Promise.all(sliced.map((s) => this.toScheduledTaskEntity(s))),
+      tasks: sliced.map((s) => this.toScheduledTaskEntity(s)),
       total: filtered.length
     }
   }
 
   async updateTask(agentId: string, taskId: string, patch: UpdateTaskDto): Promise<ScheduledTaskEntity | null> {
-    const existing = await this.getTask(agentId, taskId)
+    const existing = this.getTask(agentId, taskId)
     if (!existing) return null
 
-    const existingSnapshot = await jobScheduleService.getById(taskId)
-    if (!existingSnapshot || !isAgentTaskTemplate(existingSnapshot.jobInputTemplate)) return null
+    const existingSnapshot = jobScheduleService.getById(taskId)
+    const existingTemplate = existingSnapshot ? normalizeAgentTaskTemplate(existingSnapshot.jobInputTemplate) : null
+    if (!existingSnapshot || !existingTemplate) return null
 
     // Build the updated jobInputTemplate when prompt/timeoutMinutes changed.
-    const existingTemplate = existingSnapshot.jobInputTemplate
     const nextPrompt = patch.prompt ?? existingTemplate.prompt
     const nextTimeoutMinutes = patch.timeoutMinutes ?? existingTemplate.timeoutMinutes
+    const nextWorkspace = patch.workspace ?? existingTemplate.workspace
     const templateChanged =
       (patch.prompt !== undefined && patch.prompt !== existingTemplate.prompt) ||
-      (patch.timeoutMinutes !== undefined && patch.timeoutMinutes !== existingTemplate.timeoutMinutes)
+      (patch.timeoutMinutes !== undefined && patch.timeoutMinutes !== existingTemplate.timeoutMinutes) ||
+      patch.workspace !== undefined
 
     const updatePatch: UpdateJobScheduleDto = {}
     if (patch.name !== undefined) updatePatch.name = patch.name
@@ -177,25 +194,26 @@ export class AgentTaskService {
       updatePatch.jobInputTemplate = {
         agentId: existingTemplate.agentId,
         prompt: nextPrompt,
-        timeoutMinutes: nextTimeoutMinutes
+        timeoutMinutes: nextTimeoutMinutes,
+        workspace: nextWorkspace
       }
     }
 
-    const updated = await application.get('JobManager').updateJobSchedule(taskId, updatePatch)
+    const updated = application.get('JobManager').updateJobSchedule(taskId, updatePatch)
     if (!updated) return null
 
     if (patch.channelIds !== undefined) {
-      await agentChannelService.replaceTaskSubscriptions(taskId, patch.channelIds)
+      agentChannelService.replaceTaskSubscriptions(taskId, patch.channelIds)
     }
 
     logger.info('Task updated', { taskId, agentId })
-    const refreshed = await jobScheduleService.getById(taskId)
+    const refreshed = jobScheduleService.getById(taskId)
     if (!refreshed) return null
-    return await this.toScheduledTaskEntity(refreshed)
+    return this.toScheduledTaskEntity(refreshed)
   }
 
   async deleteTask(agentId: string, taskId: string): Promise<boolean> {
-    const existing = await this.getTask(agentId, taskId)
+    const existing = this.getTask(agentId, taskId)
     if (!existing) return false
     const deleted = await application.get('JobManager').unregisterJobScheduleById(taskId)
     if (deleted) {
@@ -204,8 +222,8 @@ export class AgentTaskService {
     return deleted
   }
 
-  async getTaskLogs(taskId: string, options: ListOptions = {}): Promise<{ logs: TaskRunLogEntity[]; total: number }> {
-    const jobs = await jobService.list({ scheduleId: taskId })
+  getTaskLogs(taskId: string, options: ListOptions = {}): { logs: TaskRunLogEntity[]; total: number } {
+    const jobs = jobService.list({ scheduleId: taskId })
     const total = jobs.length
     const sliced =
       options.limit !== undefined
@@ -224,11 +242,12 @@ export class AgentTaskService {
   // Mappers (snapshot → entity)
   // ------------------------------------------------------------------
 
-  private async toScheduledTaskEntity(snapshot: JobScheduleSnapshot): Promise<ScheduledTaskEntity> {
-    const tmpl = isAgentTaskTemplate(snapshot.jobInputTemplate)
-      ? snapshot.jobInputTemplate
-      : { agentId: '', prompt: '', timeoutMinutes: 2 }
-    const channelRows = await agentChannelService.getSubscribedChannels(snapshot.id)
+  private toScheduledTaskEntity(snapshot: JobScheduleSnapshot): ScheduledTaskEntity {
+    const tmpl = normalizeAgentTaskTemplate(snapshot.jobInputTemplate)
+    if (!tmpl) {
+      throw DataApiErrorFactory.invalidOperation('read task', 'invalid agent task template')
+    }
+    const channelRows = agentChannelService.getSubscribedChannels(snapshot.id)
     return {
       id: snapshot.id,
       agentId: tmpl.agentId,
@@ -239,6 +258,7 @@ export class AgentTaskService {
       prompt: tmpl.prompt,
       trigger: snapshot.trigger,
       timeoutMinutes: tmpl.timeoutMinutes,
+      workspace: tmpl.workspace,
       channelIds: channelRows.map((c) => c.id),
       nextRun: snapshot.nextRun,
       lastRun: snapshot.lastRun,

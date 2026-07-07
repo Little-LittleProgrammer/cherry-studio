@@ -61,26 +61,24 @@ prepare-root(container)
 
 If a child is another `directory`, `scheduleItem` queues another `knowledge.prepare-root`. If a child is `file`, `note`, or `url`, `scheduleItem` routes it to source planning and indexing. Recursive processing therefore lives in the workflow service loop, not inside a reader-specific branch.
 
-## Future Rename
-
-After the legacy v1 `src/main/services/KnowledgeService.ts` is removed, rename `KnowledgeOrchestrationService` to `KnowledgeService`. Update the `@Injectable('KnowledgeOrchestrationService')` key, service registry entry, and downstream callers in the same change.
-
 ## Job Types
 
 Round 1 job types:
 
 - `knowledge.prepare-root`: expand a container and schedule each child.
 - `knowledge.index-documents`: read/chunk/embed/write vectors for a concrete document source. Empty reader results or zero chunks still write an empty vector set and complete the item.
-- `knowledge.delete-subtree`: cancel active subtree jobs, delete vectors, detach Knowledge file refs, then delete resolved item ids with `deleteItemsByIds`. Detached `FileEntry` rows are preserved by the file module's no-reference policy.
-- `knowledge.reindex-subtree`: for terminal subtrees only, delete vectors, remove stale container descendants, reset selected root state, then call `scheduleItem`. Selected leaf root source refs remain attached and are repaired by `index-documents` from `knowledge_item.data`.
+- `knowledge.delete-subtree`: cancel active subtree jobs, delete vectors, delete base-directory files, then delete resolved item ids with `deleteItemsByIds`. The create/index path does not register FileManager refs, so there is no separate file-ref detach step; any historical `FileEntry` rows are left to the file module's no-reference policy.
+- `knowledge.reindex-subtree`: for terminal subtrees only, delete vectors, remove stale container descendants, reset selected root state, then call `scheduleItem`. Selected leaf roots keep their source files on disk and are repaired by `index-documents` from `knowledge_item.data`.
 
-- `knowledge.check-file-processing-result`: poll or inspect the FileProcessing job, attach the markdown artifact on success, then schedule indexing.
+- `knowledge.check-file-processing-result`: poll or inspect the FileProcessing job, record the converted markdown's location on the item (via `updateIndexedRelativePath`) on success, then schedule indexing.
 
-`knowledge_base.fileProcessorId` controls source planning for supported file items. When a source needs conversion, the workflow starts FileProcessing, schedules `knowledge.check-file-processing-result`, attaches the converted markdown as a `processed_artifact` ref, then indexes that artifact.
+`knowledge_base.fileProcessorId` controls source planning for supported file items. When a source needs conversion, the workflow starts FileProcessing, schedules `knowledge.check-file-processing-result`, records the converted markdown's location on the item via `updateIndexedRelativePath` (the `indexedRelativePath` leaf field, not a separate file-ref artifact row), then indexes that markdown.
+
+> Status (2026-06-08): baseline behavior. `check-file-processing-result` is a polling job: `scheduleFileProcessingCheck` reschedules it at `FILE_PROCESSING_CHECK_DELAY_MS = 5_000` (5s) intervals until the FileProcessing job reaches a terminal state; if it is still unfinished after `FILE_PROCESSING_MAX_WAIT_MS = 30 * 60 * 1000` (30 minutes), the remote job is cancelled and the item is marked `failed`. On success the output's relative path is recorded via `updateIndexedRelativePath`, then `index-documents` is scheduled.
 
 ## Mutation And Crash Semantics
 
-Same-base Knowledge mutations must go through `KnowledgeLockManager`. Main SQLite writes must still go through `DbService.withWriteTx`; the lock manager is not a replacement for the process-wide SQLite write mutex.
+Same-base Knowledge mutations must go through `KnowledgeLockManager`. Main SQLite writes still use a synchronous write transaction (`DbService.withWriteTx`, or an equivalent `db.transaction()`); the lock manager is not a replacement for that write transaction.
 
 Crash safety comes from durable jobs, durable item states, JobManager recovery, and idempotent cleanup. The in-memory mutation lock only serializes concurrent work in the current process.
 

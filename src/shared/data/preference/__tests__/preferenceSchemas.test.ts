@@ -1,0 +1,48 @@
+import { describe, expect, it } from 'vitest'
+
+import type { PreferenceSchemas } from '../preferenceSchemas'
+import { DefaultPreferences } from '../preferenceSchemas'
+
+describe('DefaultPreferences', () => {
+  it('uses flat file processing default keys', () => {
+    const markdownConversionDefault: PreferenceSchemas['default']['feature.file_processing.default_document_to_markdown'] =
+      null
+
+    expect(markdownConversionDefault).toBeNull()
+    expect(DefaultPreferences.default['feature.file_processing.default_document_to_markdown']).toBeNull()
+    expect(DefaultPreferences.default['feature.file_processing.default_image_to_text']).toBeNull()
+    expect('feature.file_processing.default.document_to_markdown' in DefaultPreferences.default).toBe(false)
+    expect('feature.file_processing.default.image_to_text' in DefaultPreferences.default).toBe(false)
+  })
+
+  it('defaults the URL fetch web search provider to jina', () => {
+    const fetchUrlsDefault: PreferenceSchemas['default']['chat.web_search.default_fetch_urls_provider'] = 'jina'
+
+    expect(DefaultPreferences.default['chat.web_search.default_fetch_urls_provider']).toBe(fetchUrlsDefault)
+  })
+
+  it('defaults the keyword search web search provider to exa-mcp', () => {
+    const searchKeywordsDefault: PreferenceSchemas['default']['chat.web_search.default_search_keywords_provider'] =
+      'exa-mcp'
+
+    expect(DefaultPreferences.default['chat.web_search.default_search_keywords_provider']).toBe(searchKeywordsDefault)
+  })
+
+  it('groups conversations and agent sessions by the traditional view defaults for new users', () => {
+    const topicDisplayDefault: PreferenceSchemas['default']['topic.tab.display_mode'] = 'time'
+    const agentSessionDisplayDefault: PreferenceSchemas['default']['agent.session.display_mode'] = 'workdir'
+
+    expect(DefaultPreferences.default['topic.tab.display_mode']).toBe(topicDisplayDefault)
+    expect(DefaultPreferences.default['agent.session.display_mode']).toBe(agentSessionDisplayDefault)
+  })
+
+  it('defaults both conversation and work surfaces to the classic layout for new users', () => {
+    const topicLayoutDefault: PreferenceSchemas['default']['topic.layout'] = 'classic'
+    const agentLayoutDefault: PreferenceSchemas['default']['agent.layout'] = 'classic'
+
+    // preferenceSchemas.ts is generated from classification.json; pin the defaults so a
+    // regeneration that drops or flips either layout key fails loudly instead of shipping silently.
+    expect(DefaultPreferences.default['topic.layout']).toBe(topicLayoutDefault)
+    expect(DefaultPreferences.default['agent.layout']).toBe(agentLayoutDefault)
+  })
+})

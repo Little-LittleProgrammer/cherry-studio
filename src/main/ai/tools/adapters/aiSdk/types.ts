@@ -10,6 +10,14 @@ export interface ToolApplyScope {
   readonly assistant?: Assistant
   /** Server allowlist + per-tool disable already applied. */
   readonly mcpToolIds: ReadonlySet<string>
+  /** True when the request carries first-party file attachments — gates the `read_file` tool. Defaults to false. */
+  readonly hasFileAttachments?: boolean
+  /** True when the user has at least one knowledge base — gates the `kb_*` tools. Defaults to false. */
+  readonly hasAnyKnowledgeBase?: boolean
+  /**
+   * Effective knowledge base scope for this request; see `resolveKnowledgeBaseIds`. Defaults to empty.
+   */
+  readonly knowledgeBaseIds?: readonly string[]
 }
 
 /**
@@ -22,9 +30,9 @@ export type ToolDefer = 'never' | 'always' | 'auto'
 export interface ToolEntry {
   /**
    * Unique wire-name the LLM emits.
-   *   builtin: 'web__search', 'web__fetch', 'kb__search'
+   *   builtin: 'web_search', 'web_fetch', 'kb_search'
    *   mcp:     'mcp__{camelCase(serverName)}__{camelCase(toolName)}' (see `buildFunctionCallToolName`)
-   *   meta:    'tool_search', 'tool_invoke', 'exec'
+   *   meta:    'tool_search', 'tool_inspect', 'tool_invoke', 'tool_exec'
    *
    * Double underscore is the segment separator so single `_` stays unambiguous.
    */

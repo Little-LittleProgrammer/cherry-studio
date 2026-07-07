@@ -1,12 +1,11 @@
-import '@ant-design/v5-patch-for-react-19'
+import '@renderer/assets/styles/tailwind.css'
 
 import { preferenceService } from '@data/PreferenceService'
-import { loggerService } from '@logger'
+import { initI18n } from '@renderer/i18n/resolver'
 import { createRoot } from 'react-dom/client'
 
 import SelectionToolbarApp from './SelectionToolbarApp'
 
-loggerService.initWindowSource('SelectionToolbar')
 await preferenceService.preload([
   'app.language',
   'ui.custom_css',
@@ -15,6 +14,8 @@ await preferenceService.preload([
   'feature.selection.compact',
   'feature.selection.action_items'
 ])
+
+await initI18n()
 
 const root = createRoot(document.getElementById('root') as HTMLElement)
 root.render(<SelectionToolbarApp />)

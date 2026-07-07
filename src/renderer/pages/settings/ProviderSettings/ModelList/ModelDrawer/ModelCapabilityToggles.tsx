@@ -6,7 +6,7 @@ import {
   ToolsCallingTag,
   VisionTag,
   WebSearchTag
-} from '@renderer/components/Tags/Model'
+} from '@renderer/components/tags/Model'
 import { MODEL_CAPABILITY } from '@shared/data/types/model'
 import { RotateCcw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -34,7 +34,7 @@ export function ModelCapabilityToggles({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-1 font-[weight:var(--font-weight-semibold)] text-[length:var(--font-size-body-md)] text-foreground/90 leading-[var(--line-height-body-md)]">
+        <div className="flex items-center gap-1 font-semibold text-foreground/90 text-sm leading-5">
           {t('models.type.select')}
           <WarnTooltip content={t('settings.moresetting.check.warn')} />
         </div>

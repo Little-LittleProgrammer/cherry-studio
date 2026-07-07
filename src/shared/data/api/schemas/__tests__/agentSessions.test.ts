@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  AGENT_SESSION_DELETE_MAX_IDS,
   AgentSessionMessageEntitySchema,
+  AgentSessionMessagesListQuerySchema,
   CreateAgentSessionMessageSchema,
   CreateAgentSessionMessagesSchema,
+  CreateAgentSessionSchema,
+  DeleteAgentSessionsQuerySchema,
+  SetAgentSessionWorkspaceSchema,
   UpdateAgentSessionSchema
 } from '../agentSessions'
 
@@ -17,7 +22,6 @@ describe('AgentSessionMessage schemas', () => {
     status: 'success',
     modelId: null,
     modelSnapshot: null,
-    traceId: null,
     stats: null,
     runtimeResumeToken: null,
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -47,14 +51,85 @@ describe('AgentSessionMessage schemas', () => {
 
     expect(parsed.runtimeResumeToken).toBeUndefined()
   })
+
+  it('accepts messageId as a list pagination anchor', () => {
+    expect(AgentSessionMessagesListQuerySchema.parse({ messageId: 'message-1', limit: '25' })).toEqual({
+      messageId: 'message-1',
+      limit: 25
+    })
+    expect(AgentSessionMessagesListQuerySchema.safeParse({ messageId: '' }).success).toBe(false)
+  })
 })
 
 describe('AgentSession schemas', () => {
-  it('rejects workspace updates because workspace binding is insert-only', () => {
+  it('accepts workspace changes through the dedicated workspace source body', () => {
+    expect(SetAgentSessionWorkspaceSchema.safeParse({ type: 'user', workspaceId: 'workspace-1' }).success).toBe(true)
+    expect(SetAgentSessionWorkspaceSchema.safeParse({ type: 'system' }).success).toBe(true)
+    expect(SetAgentSessionWorkspaceSchema.safeParse({ type: 'user' }).success).toBe(false)
+  })
+
+  it('rejects workspace fields on the generic session PATCH body', () => {
+    expect(
+      UpdateAgentSessionSchema.safeParse({
+        workspace: { type: 'user', workspaceId: 'workspace-1' }
+      }).success
+    ).toBe(false)
     expect(
       UpdateAgentSessionSchema.safeParse({
         workspaceId: 'workspace-1'
       }).success
     ).toBe(false)
+  })
+
+  it('accepts manual-name marker updates', () => {
+    expect(
+      UpdateAgentSessionSchema.parse({
+        name: 'Renamed session',
+        isNameManuallyEdited: true
+      })
+    ).toEqual({
+      name: 'Renamed session',
+      isNameManuallyEdited: true
+    })
+  })
+
+  it('allows blank names for untitled placeholder sessions', () => {
+    expect(
+      CreateAgentSessionSchema.safeParse({
+        agentId: 'agent-1',
+        name: '',
+        workspace: { type: 'system' }
+      }).success
+    ).toBe(true)
+    expect(UpdateAgentSessionSchema.parse({ name: '' })).toEqual({ name: '' })
+  })
+
+  it('caps session names at 255 characters, matching topic.name semantics', () => {
+    const maxName = 'a'.repeat(255)
+    const overflowName = 'a'.repeat(256)
+
+    expect(
+      CreateAgentSessionSchema.safeParse({
+        agentId: 'agent-1',
+        name: maxName,
+        workspace: { type: 'system' }
+      }).success
+    ).toBe(true)
+    expect(
+      CreateAgentSessionSchema.safeParse({
+        agentId: 'agent-1',
+        name: overflowName,
+        workspace: { type: 'system' }
+      }).success
+    ).toBe(false)
+    expect(UpdateAgentSessionSchema.safeParse({ name: overflowName }).success).toBe(false)
+  })
+
+  it('caps bulk delete ids', () => {
+    const validIds = Array.from({ length: AGENT_SESSION_DELETE_MAX_IDS }, (_, index) => `session-${index}`).join(',')
+    const tooManyIds = `${validIds},session-overflow`
+
+    expect(DeleteAgentSessionsQuerySchema.safeParse({ ids: validIds }).success).toBe(true)
+    expect(DeleteAgentSessionsQuerySchema.safeParse({ ids: tooManyIds }).success).toBe(false)
   })
 })

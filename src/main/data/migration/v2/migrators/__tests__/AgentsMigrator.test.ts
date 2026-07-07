@@ -23,7 +23,7 @@ vi.mock('@application', async () => {
 })
 
 import { LegacyAgentsDbReader } from '../../utils/LegacyAgentsDbReader'
-import { AgentsMigrator } from '../AgentsMigrator'
+import { AgentsMigrator, backfillAgentOrderKeys, migrateAgentMcps } from '../AgentsMigrator'
 import { AGENTS_TABLE_MIGRATION_SPECS } from '../mappings/AgentsDbMappings'
 
 function createCounts() {
@@ -59,6 +59,7 @@ function createMigrationContext(overrides: Record<string, unknown> = {}) {
     paths: {
       legacyAgentDbFile: '/mock/Data/agents.db'
     },
+    sharedData: new Map(),
     ...overrides
   } as never
 }
@@ -87,8 +88,8 @@ describe('AgentsMigrator', () => {
 
   it('prepare counts all legacy agents rows', async () => {
     vi.spyOn(LegacyAgentsDbReader.prototype, 'resolvePath').mockReturnValue('/mock/feature.agents.db_file')
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockResolvedValue(createSchemaInfo() as never)
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockResolvedValue(createCounts())
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockReturnValue(createSchemaInfo() as never)
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockReturnValue(createCounts())
 
     const result = await migrator.prepare(createMigrationContext())
 
@@ -100,11 +101,11 @@ describe('AgentsMigrator', () => {
   })
 
   it('execute attaches the legacy db and imports every table without per-migrator FK toggling', async () => {
-    const run = vi.fn().mockResolvedValue(undefined)
+    const run = vi.fn().mockReturnValue(undefined)
     // remapAgentPrefixIds calls db.select().from().where() to find old-prefix IDs;
     // mock to return empty arrays so the remap loop is a no-op.
     const select = vi.fn().mockReturnValue({
-      from: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([]) })
+      from: vi.fn().mockReturnValue({ orderBy: vi.fn().mockResolvedValue([]), where: vi.fn().mockResolvedValue([]) })
     })
     const update = vi.fn().mockReturnValue({
       set: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) })
@@ -121,11 +122,11 @@ describe('AgentsMigrator', () => {
       })
     })
     // remapAgentPrefixIds runs PRAGMA foreign_key_check via db.all; empty => no FK violations.
-    const all = vi.fn().mockResolvedValue([])
+    const all = vi.fn().mockReturnValue([])
 
     vi.spyOn(LegacyAgentsDbReader.prototype, 'resolvePath').mockReturnValue('/mock/feature.agents.db_file')
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockResolvedValue(createSchemaInfo() as never)
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockResolvedValue(createCounts())
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockReturnValue(createSchemaInfo() as never)
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockReturnValue(createCounts())
 
     await migrator.prepare(createMigrationContext())
     const result = await migrator.execute(
@@ -139,7 +140,7 @@ describe('AgentsMigrator', () => {
     expect(result.processedCount).toBe(26)
 
     const outer = getExecutedSql(run)
-    // FK is managed globally by the engine (MigrationDbService setPragma) — no per-migrator
+    // FK is managed globally by the engine (MigrationDbService sets foreign_keys = OFF once) — no per-migrator
     // PRAGMA toggling. Import phase: ATTACH → BEGIN → [INSERTs] → COMMIT
     expect(outer[0]).toBe("ATTACH DATABASE '/mock/feature.agents.db_file' AS agents_legacy")
     expect(outer[1]).toBe('BEGIN')
@@ -149,6 +150,12 @@ describe('AgentsMigrator', () => {
     expect(outer.at(-3)).toBe('BEGIN')
     expect(outer.at(-2)).toBe('COMMIT')
     expect(outer.at(-1)).toBe('DETACH DATABASE agents_legacy')
+    // Session-workspace staging runs first inside the import transaction, emitted
+    // via run() before the table INSERTs.
+    expect(outer).toContain(
+      'CREATE TEMP TABLE IF NOT EXISTS session_workspace_map (session_id TEXT PRIMARY KEY, workspace_id TEXT)'
+    )
+    expect(outer).toContain('DELETE FROM session_workspace_map')
     // FK is centralized in the engine now — the migrator emits no PRAGMA toggles.
     expect(outer).not.toContain('PRAGMA foreign_keys = OFF')
     expect(outer).not.toContain('PRAGMA foreign_keys = ON')
@@ -163,19 +170,37 @@ describe('AgentsMigrator', () => {
     expect(all).toHaveBeenCalled()
   })
 
+  it('backfills agent order keys from legacy sort_order before id remap', async () => {
+    const all = vi
+      .fn()
+      .mockReturnValueOnce([{ id: 'agent-b' }, { id: 'agent-a' }])
+      .mockReturnValueOnce([])
+    const run = vi.fn().mockReturnValue(undefined)
+
+    backfillAgentOrderKeys({ all, run } as never)
+
+    const [query] = all.mock.calls[0]
+    expect(query.queryChunks[0]?.value?.[0]).toContain('LEFT JOIN agents_legacy.agents')
+    expect(query.queryChunks[0]?.value?.[0]).toContain('ORDER BY COALESCE(s.sort_order, 0) ASC')
+    expect(run).toHaveBeenCalledTimes(2)
+  })
+
   it('rolls back and detaches when an import statement fails inside the transaction', async () => {
     // First 2 calls succeed (ATTACH, BEGIN), 3rd (first INSERT) fails. FK is managed
     // globally by the engine now, so no per-migrator FK pragma appears in this sequence.
     const run = vi
       .fn()
-      .mockResolvedValueOnce(undefined) // ATTACH
-      .mockResolvedValueOnce(undefined) // BEGIN
-      .mockRejectedValueOnce(new Error('insert failed')) // first INSERT fails
-      .mockResolvedValue(undefined) // ROLLBACK, DETACH
+      .mockReturnValueOnce(undefined) // ATTACH
+      .mockReturnValueOnce(undefined) // BEGIN
+      .mockImplementationOnce(() => {
+        // better-sqlite3 run() is synchronous and throws synchronously on failure.
+        throw new Error('insert failed')
+      }) // first staged statement fails
+      .mockReturnValue(undefined) // ROLLBACK, DETACH
 
     vi.spyOn(LegacyAgentsDbReader.prototype, 'resolvePath').mockReturnValue('/mock/feature.agents.db_file')
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockResolvedValue(createSchemaInfo() as never)
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockResolvedValue(createCounts())
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockReturnValue(createSchemaInfo() as never)
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockReturnValue(createCounts())
 
     await migrator.prepare(createMigrationContext())
     await expect(migrator.execute(createMigrationContext({ db: { run } }))).rejects.toThrow('insert failed')
@@ -189,8 +214,8 @@ describe('AgentsMigrator', () => {
 
   it('validate fails when imported table counts are lower than the expected filtered counts', async () => {
     vi.spyOn(LegacyAgentsDbReader.prototype, 'resolvePath').mockReturnValue('/mock/feature.agents.db_file')
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockResolvedValue(createSchemaInfo() as never)
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockResolvedValue(createCounts())
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockReturnValue(createSchemaInfo() as never)
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockReturnValue(createCounts())
 
     // Workspace prelude (3 calls): selectLegacySessionWorkspaceRows skips
     // db.all because the test schema lacks `sessions.agent_id`; the other 3
@@ -198,23 +223,23 @@ describe('AgentsMigrator', () => {
     // fire before the spec loop.
     const all = vi
       .fn()
-      .mockResolvedValueOnce([{ count: 0 }]) // workspaceRows target
-      .mockResolvedValueOnce([{ count: 0 }]) // invalidSessionWorkspaceRows
-      .mockResolvedValueOnce([]) // targetWorkspacePathCounts
-      .mockResolvedValueOnce([{ count: 0 }]) // agent target (expected 1 → mismatch)
-      .mockResolvedValueOnce([{ count: 1 }]) // agent expected
-      .mockResolvedValueOnce([{ count: 2 }]) // agent_session target
-      .mockResolvedValueOnce([{ count: 2 }]) // agent_session expected
-      .mockResolvedValueOnce([{ count: 3 }]) // agent_global_skill target
-      .mockResolvedValueOnce([{ count: 3 }]) // agent_global_skill expected
-      .mockResolvedValueOnce([{ count: 4 }]) // agent_skill target
-      .mockResolvedValueOnce([{ count: 4 }]) // agent_skill expected
-      .mockResolvedValueOnce([{ count: 6 }]) // agent_channel target (expected 7 → mismatch)
-      .mockResolvedValueOnce([{ count: 7 }]) // agent_channel expected
-      .mockResolvedValueOnce([{ count: 9 }]) // agent_session_message target
-      .mockResolvedValueOnce([{ count: 9 }]) // agent_session_message expected
+      .mockReturnValueOnce([{ count: 0 }]) // workspaceRows target
+      .mockReturnValueOnce([{ count: 0 }]) // invalidSessionWorkspaceRows
+      .mockReturnValueOnce([]) // targetWorkspacePathCounts
+      .mockReturnValueOnce([{ count: 0 }]) // agent target (expected 1 → mismatch)
+      .mockReturnValueOnce([{ count: 1 }]) // agent expected
+      .mockReturnValueOnce([{ count: 2 }]) // agent_session target
+      .mockReturnValueOnce([{ count: 2 }]) // agent_session expected
+      .mockReturnValueOnce([{ count: 3 }]) // agent_global_skill target
+      .mockReturnValueOnce([{ count: 3 }]) // agent_global_skill expected
+      .mockReturnValueOnce([{ count: 4 }]) // agent_skill target
+      .mockReturnValueOnce([{ count: 4 }]) // agent_skill expected
+      .mockReturnValueOnce([{ count: 6 }]) // agent_channel target (expected 7 → mismatch)
+      .mockReturnValueOnce([{ count: 7 }]) // agent_channel expected
+      .mockReturnValueOnce([{ count: 9 }]) // agent_session_message target
+      .mockReturnValueOnce([{ count: 9 }]) // agent_session_message expected
 
-    const run = vi.fn().mockResolvedValue(undefined)
+    const run = vi.fn().mockReturnValue(undefined)
 
     await migrator.prepare(createMigrationContext())
     const result = await migrator.validate(createMigrationContext({ db: { all, run } }))
@@ -232,7 +257,7 @@ describe('AgentsMigrator', () => {
   it('validate skips specs whose source table is missing from the legacy db', async () => {
     // Reproduces the production crash where a legacy agents.db lacks newer
     // tables (e.g. agent_skills): validate would otherwise SELECT FROM
-    // agents_legacy.agent_skills and the libsql client would raise
+    // agents_legacy.agent_skills and the SQLite engine would raise
     // "no such table: agents_legacy.agent_skills".
     const partialSchema = createSchemaInfo()
     partialSchema.agent_skills = { exists: false, columns: new Set() }
@@ -240,8 +265,8 @@ describe('AgentsMigrator', () => {
     const partialCounts = { ...createCounts(), agent_skills: 0, session_messages: 0 }
 
     vi.spyOn(LegacyAgentsDbReader.prototype, 'resolvePath').mockReturnValue('/mock/feature.agents.db_file')
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockResolvedValue(partialSchema as never)
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockResolvedValue(partialCounts)
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockReturnValue(partialSchema as never)
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockReturnValue(partialCounts)
 
     // 3 workspace-prelude calls + 4 present specs × 2 = 11 total. Each present
     // spec issues two queries (target count + expected count) and the workspace
@@ -250,14 +275,14 @@ describe('AgentsMigrator', () => {
     // out of queued responses and return undefined, surfacing the failure.
     const all = vi
       .fn()
-      .mockResolvedValueOnce([{ count: 0 }]) // workspaceRows target
-      .mockResolvedValueOnce([{ count: 0 }]) // invalidSessionWorkspaceRows
-      .mockResolvedValueOnce([]) // targetWorkspacePathCounts
+      .mockReturnValueOnce([{ count: 0 }]) // workspaceRows target
+      .mockReturnValueOnce([{ count: 0 }]) // invalidSessionWorkspaceRows
+      .mockReturnValueOnce([]) // targetWorkspacePathCounts
     for (let i = 0; i < 4; i++) {
-      all.mockResolvedValueOnce([{ count: 1 }]).mockResolvedValueOnce([{ count: 1 }])
+      all.mockReturnValueOnce([{ count: 1 }]).mockReturnValueOnce([{ count: 1 }])
     }
 
-    const run = vi.fn().mockResolvedValue(undefined)
+    const run = vi.fn().mockReturnValue(undefined)
 
     await migrator.prepare(createMigrationContext())
     const result = await migrator.validate(createMigrationContext({ db: { all, run } }))
@@ -272,28 +297,28 @@ describe('AgentsMigrator', () => {
 
   it('validate flags target tables whose row count exceeds the expected filtered count', async () => {
     vi.spyOn(LegacyAgentsDbReader.prototype, 'resolvePath').mockReturnValue('/mock/feature.agents.db_file')
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockResolvedValue(createSchemaInfo() as never)
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockResolvedValue(createCounts())
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockReturnValue(createSchemaInfo() as never)
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockReturnValue(createCounts())
 
     const all = vi
       .fn()
-      .mockResolvedValueOnce([{ count: 0 }]) // workspaceRows target
-      .mockResolvedValueOnce([{ count: 0 }]) // invalidSessionWorkspaceRows
-      .mockResolvedValueOnce([]) // targetWorkspacePathCounts
-      .mockResolvedValueOnce([{ count: 2 }]) // agent target (expected 1 → too high)
-      .mockResolvedValueOnce([{ count: 1 }]) // agent expected
-      .mockResolvedValueOnce([{ count: 2 }]) // agent_session target
-      .mockResolvedValueOnce([{ count: 2 }]) // agent_session expected
-      .mockResolvedValueOnce([{ count: 3 }]) // agent_global_skill target
-      .mockResolvedValueOnce([{ count: 3 }]) // agent_global_skill expected
-      .mockResolvedValueOnce([{ count: 4 }]) // agent_skill target
-      .mockResolvedValueOnce([{ count: 4 }]) // agent_skill expected
-      .mockResolvedValueOnce([{ count: 7 }]) // agent_channel target
-      .mockResolvedValueOnce([{ count: 7 }]) // agent_channel expected
-      .mockResolvedValueOnce([{ count: 9 }]) // agent_session_message target
-      .mockResolvedValueOnce([{ count: 9 }]) // agent_session_message expected
+      .mockReturnValueOnce([{ count: 0 }]) // workspaceRows target
+      .mockReturnValueOnce([{ count: 0 }]) // invalidSessionWorkspaceRows
+      .mockReturnValueOnce([]) // targetWorkspacePathCounts
+      .mockReturnValueOnce([{ count: 2 }]) // agent target (expected 1 → too high)
+      .mockReturnValueOnce([{ count: 1 }]) // agent expected
+      .mockReturnValueOnce([{ count: 2 }]) // agent_session target
+      .mockReturnValueOnce([{ count: 2 }]) // agent_session expected
+      .mockReturnValueOnce([{ count: 3 }]) // agent_global_skill target
+      .mockReturnValueOnce([{ count: 3 }]) // agent_global_skill expected
+      .mockReturnValueOnce([{ count: 4 }]) // agent_skill target
+      .mockReturnValueOnce([{ count: 4 }]) // agent_skill expected
+      .mockReturnValueOnce([{ count: 7 }]) // agent_channel target
+      .mockReturnValueOnce([{ count: 7 }]) // agent_channel expected
+      .mockReturnValueOnce([{ count: 9 }]) // agent_session_message target
+      .mockReturnValueOnce([{ count: 9 }]) // agent_session_message expected
 
-    const run = vi.fn().mockResolvedValue(undefined)
+    const run = vi.fn().mockReturnValue(undefined)
 
     await migrator.prepare(createMigrationContext())
     const result = await migrator.validate(createMigrationContext({ db: { all, run } }))
@@ -313,12 +338,12 @@ describe('AgentsMigrator', () => {
     const resolvePath = vi
       .spyOn(LegacyAgentsDbReader.prototype, 'resolvePath')
       .mockReturnValue('/mock/feature.agents.db_file')
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockResolvedValue(createSchemaInfo() as never)
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockResolvedValue(createCounts())
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockReturnValue(createSchemaInfo() as never)
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockReturnValue(createCounts())
 
-    const run = vi.fn().mockResolvedValue(undefined)
+    const run = vi.fn().mockReturnValue(undefined)
     const select = vi.fn().mockReturnValue({
-      from: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([]) })
+      from: vi.fn().mockReturnValue({ orderBy: vi.fn().mockResolvedValue([]), where: vi.fn().mockResolvedValue([]) })
     })
     const update = vi.fn().mockReturnValue({
       set: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) })
@@ -330,7 +355,7 @@ describe('AgentsMigrator', () => {
         onConflictDoNothing: vi.fn().mockResolvedValue(undefined)
       })
     })
-    const all = vi.fn().mockResolvedValue([])
+    const all = vi.fn().mockReturnValue([])
     const migrationContext = createMigrationContext({
       db: { run, select, update, all, delete: del, insert }
     })
@@ -344,16 +369,85 @@ describe('AgentsMigrator', () => {
 
   it('validate attaches the legacy db to compare against expected filtered counts', async () => {
     vi.spyOn(LegacyAgentsDbReader.prototype, 'resolvePath').mockReturnValue('/mock/feature.agents.db_file')
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockResolvedValue(createSchemaInfo() as never)
-    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockResolvedValue(createCounts())
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'inspectSchema').mockReturnValue(createSchemaInfo() as never)
+    vi.spyOn(LegacyAgentsDbReader.prototype, 'countRows').mockReturnValue(createCounts())
 
-    const run = vi.fn().mockResolvedValue(undefined)
-    const all = vi.fn().mockResolvedValue([{ count: 1 }])
+    const run = vi.fn().mockReturnValue(undefined)
+    const all = vi.fn().mockReturnValue([{ count: 1 }])
 
     await migrator.prepare(createMigrationContext())
     await migrator.validate(createMigrationContext({ db: { run, all } }))
 
     expect(getExecutedSql(run)[0]).toBe("ATTACH DATABASE '/mock/feature.agents.db_file' AS agents_legacy")
     expect(getExecutedSql(run).at(-1)).toBe('DETACH DATABASE agents_legacy')
+  })
+
+  describe('migrateAgentMcps', () => {
+    it('remaps legacy mcp ids to new ids and inserts junction rows', async () => {
+      const all = vi.fn().mockReturnValue([
+        { agentId: 'agent-1', oldMcpId: 'mcp-a' },
+        { agentId: 'agent-1', oldMcpId: 'mcp-b' },
+        { agentId: 'agent-2', oldMcpId: 'mcp-a' }
+      ])
+      const valuesFn = vi.fn().mockResolvedValue(undefined)
+      const insert = vi.fn().mockReturnValue({ values: valuesFn })
+      const mapping = new Map([
+        ['mcp-a', 'new-a'],
+        ['mcp-b', 'new-b']
+      ])
+
+      await migrateAgentMcps({ all, insert } as never, mapping)
+
+      expect(all).toHaveBeenCalledTimes(1)
+      // Batch insert — single values() call with 3 remapped rows
+      expect(insert).toHaveBeenCalledTimes(1)
+      expect(valuesFn).toHaveBeenCalledTimes(1)
+      const valuesCall = valuesFn.mock.calls[0][0]
+      expect(valuesCall).toHaveLength(3)
+      expect(valuesCall).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ agentId: 'agent-1', mcpServerId: 'new-a' }),
+          expect.objectContaining({ agentId: 'agent-1', mcpServerId: 'new-b' }),
+          expect.objectContaining({ agentId: 'agent-2', mcpServerId: 'new-a' })
+        ])
+      )
+    })
+
+    it('drops legacy refs whose id is missing from the mapping', async () => {
+      const all = vi.fn().mockReturnValue([
+        { agentId: 'agent-1', oldMcpId: 'mcp-a' },
+        { agentId: 'agent-1', oldMcpId: 'mcp-gone' }
+      ])
+      const valuesFn = vi.fn().mockResolvedValue(undefined)
+      const insert = vi.fn().mockReturnValue({ values: valuesFn })
+      const mapping = new Map([['mcp-a', 'new-a']])
+
+      await migrateAgentMcps({ all, insert } as never, mapping)
+
+      expect(insert).toHaveBeenCalledTimes(1)
+      const valuesCall = valuesFn.mock.calls[0][0]
+      expect(valuesCall).toHaveLength(1)
+      expect(valuesCall[0]).toEqual(expect.objectContaining({ agentId: 'agent-1', mcpServerId: 'new-a' }))
+    })
+
+    it('skips insert when no rows match the query', async () => {
+      const all = vi.fn().mockReturnValue([])
+      const insert = vi.fn()
+
+      await migrateAgentMcps({ all, insert } as never, new Map())
+
+      expect(all).toHaveBeenCalledTimes(1)
+      expect(insert).not.toHaveBeenCalled()
+    })
+
+    it('throws when rows need remapping but the mapping is absent', async () => {
+      const all = vi.fn().mockReturnValue([{ agentId: 'agent-1', oldMcpId: 'mcp-a' }])
+      const insert = vi.fn()
+
+      await expect(migrateAgentMcps({ all, insert } as never, undefined)).rejects.toThrow(
+        /mcpServerIdMapping not found/
+      )
+      expect(insert).not.toHaveBeenCalled()
+    })
   })
 })

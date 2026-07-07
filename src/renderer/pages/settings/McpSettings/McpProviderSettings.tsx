@@ -1,17 +1,17 @@
 import { Button, Input } from '@cherrystudio/ui'
 import { loggerService } from '@logger'
 import CollapsibleSearchBar from '@renderer/components/CollapsibleSearchBar'
-import db from '@renderer/databases'
+import { SettingsContentColumn } from '@renderer/components/SettingsPrimitives'
+import db from '@renderer/databases/db'
 import { useMcpServers } from '@renderer/hooks/useMcpServer'
-import type { McpServer } from '@renderer/types'
 import { cn } from '@renderer/utils/style'
+import type { McpServer } from '@shared/data/types/mcpServer'
 import { Check, Plus, SquareArrowOutUpRight } from 'lucide-react'
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { SettingsContentColumn } from '..'
-import { getMcpProviderLogo, getProviderDisplayName, type ProviderConfig } from './providers/config'
+import { getProviderDisplayName, type ProviderConfig } from './providers/config'
 import { isSameMcpServerCandidate, toCreateMcpServerDto } from './utils'
 
 const logger = loggerService.withContext('McpProviderSettings')
@@ -118,13 +118,10 @@ const McpProviderSettings: React.FC<Props> = ({ provider, existingServers }) => 
   }, [provider, t, token])
 
   const isFetchDisabled = !token
-  const ProviderLogo = getMcpProviderLogo(provider.key)
-
   return (
     <DetailContainer>
       <ProviderHeader>
         <div className="flex min-w-0 items-center gap-3">
-          {ProviderLogo && <ProviderLogo.Avatar size={36} shape="circle" />}
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-1.5">
               <ProviderName>{getProviderDisplayName(provider, t)}</ProviderName>
@@ -140,13 +137,13 @@ const McpProviderSettings: React.FC<Props> = ({ provider, existingServers }) => 
                 </Button>
               )}
             </div>
-            <ProviderDescription>{t(provider.descriptionKey)}</ProviderDescription>
           </div>
         </div>
         <Button
           onClick={handleFetch}
           disabled={isFetching || isFetchDisabled}
-          className="h-8 shrink-0 rounded-lg px-3 text-xs shadow-none">
+          size="sm"
+          className="h-7 shrink-0 rounded-lg px-2 text-xs shadow-none">
           {t('settings.mcp.fetch.button', 'Fetch Servers')}
         </Button>
       </ProviderHeader>
@@ -192,7 +189,7 @@ const McpProviderSettings: React.FC<Props> = ({ provider, existingServers }) => 
               <ServerItem key={server.id}>
                 <div className="flex flex-1 flex-row items-center gap-3">
                   {server.logoUrl && (
-                    <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center overflow-hidden rounded-md bg-gray-100 dark:bg-gray-800">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md bg-gray-100 dark:bg-gray-800">
                       <img src={server.logoUrl} alt={server.name} className="h-full w-full object-cover" />
                     </div>
                   )}
@@ -237,15 +234,14 @@ const DetailContainer = ({ className, ...props }: React.ComponentPropsWithoutRef
 )
 
 const ProviderHeader = ({ className, ...props }: React.ComponentPropsWithoutRef<'div'>) => (
-  <div className={cn('flex items-center justify-between gap-3 border-border/70 border-b pb-2', className)} {...props} />
+  <div
+    className={cn('flex items-center justify-between gap-3 border-border/70 border-b pb-1.5', className)}
+    {...props}
+  />
 )
 
 const ProviderName = ({ className, ...props }: React.ComponentPropsWithoutRef<'span'>) => (
-  <span className={cn('min-w-0 truncate font-semibold text-base leading-6', className)} {...props} />
-)
-
-const ProviderDescription = ({ className, ...props }: React.ComponentPropsWithoutRef<'div'>) => (
-  <div className={cn('mt-0.5 text-muted-foreground text-xs leading-5', className)} {...props} />
+  <span className={cn('min-w-0 truncate font-semibold text-[15px] leading-5', className)} {...props} />
 )
 
 const SettingsPanel = ({ className, ...props }: React.ComponentPropsWithoutRef<'div'>) => (

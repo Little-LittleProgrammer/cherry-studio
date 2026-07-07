@@ -1,7 +1,7 @@
 import { Button, Dialog, DialogContent, DialogHeader, DialogTitle, Input, Tooltip } from '@cherrystudio/ui'
-import { EditIcon } from '@renderer/components/Icons'
+import EditIcon from '@renderer/components/icons/EditIcon'
 import Scrollbar from '@renderer/components/Scrollbar'
-import { TopView } from '@renderer/components/TopView'
+import { TopView } from '@renderer/components/TopView/TopView'
 import { maskApiKey } from '@renderer/utils/api'
 import { cn } from '@renderer/utils/style'
 import type { WebSearchProviderId } from '@shared/data/preference/preferenceTypes'
@@ -102,7 +102,7 @@ const WebSearchApiKeyItem: FC<WebSearchApiKeyItemProps> = ({ item, onUpdate, onR
               }
             }}
             placeholder={t('settings.provider.api.key.new_key.placeholder')}
-            className="h-8 min-w-0 flex-1 rounded-lg border-border/30 bg-foreground/[0.03] text-xs leading-tight placeholder:text-foreground/25 md:text-xs"
+            className="h-8 min-w-0 flex-1 rounded-lg border-border/30 bg-foreground/3 text-xs leading-tight placeholder:text-foreground/25 md:text-xs"
             spellCheck={false}
           />
           <div className="flex shrink-0 items-center gap-0.5">
@@ -172,7 +172,7 @@ export const WebSearchApiKeyList: FC<WebSearchApiKeyListProps> = ({ providerId }
 
   return (
     <div className="py-3">
-      <div className="overflow-hidden rounded-xl border border-border/60 bg-foreground/[0.02]">
+      <div className="overflow-hidden rounded-xl border border-border/60 bg-foreground/2">
         {displayItems.length === 0 ? (
           <div className="px-3 py-2 text-muted-foreground text-xs leading-tight">{t('error.no_api_key')}</div>
         ) : (
@@ -231,12 +231,15 @@ const PopupContainer: FC<PopupProps> = ({ providerId, title, resolve }) => {
 
     resolvedRef.current = true
     setOpen(false)
-    resolve(null)
+    window.setTimeout(() => {
+      resolve(null)
+      TopView.hide(TopViewKey)
+    }, 200)
   }
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => (nextOpen ? setOpen(true) : closePopup())}>
-      <DialogContent className="sm:max-w-150">
+      <DialogContent closeOnOverlayClick={false} className="sm:max-w-150">
         <DialogHeader>
           <DialogTitle className="text-sm">{title || t('settings.provider.api.key.list.title')}</DialogTitle>
         </DialogHeader>
@@ -256,7 +259,6 @@ export class WebSearchApiKeyListPopup {
           {...props}
           resolve={(value) => {
             resolve(value)
-            TopView.hide(TopViewKey)
           }}
         />,
         TopViewKey

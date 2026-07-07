@@ -14,7 +14,7 @@
 
 ```text
 UI / preload IPC / main-side workflow
-  -> KnowledgeOrchestrationService
+  -> KnowledgeService
      -> KnowledgeWorkflowService
         -> JobManager
            -> knowledge.prepare-root
@@ -47,7 +47,7 @@ Data API knowledge handlers：
 1. 只暴露数据库可直接满足的读和 base metadata/config 更新。
 2. 不负责 runtime mutation，不创建或删除 vector store artifacts。
 
-`KnowledgeOrchestrationService`：
+`KnowledgeService`：
 
 1. 负责 caller-facing `knowledge-runtime:*` IPC。
 2. 负责 create/delete/restore base workflow。
@@ -290,10 +290,10 @@ Restore 允许 failed base，也允许 completed base；即使 completed source 
 1. 拒绝 failed base。
 2. 拒绝没有 searchable token 的 query。
 3. 使用 base embedding model 生成 query embedding。
-4. 查询 libSQL vector store。
+4. 查询 sqlite-vec vector store。
 5. 过滤 missing / other-base / deleting source item 的结果。
 6. 如果配置了 rerank model，执行 rerank。
-7. 应用 threshold 并写入 rank。
+7. 仅对 `scoreKind = relevance` 的结果应用 relevance threshold；BM25 / hybrid 的 ranking 分数不做 threshold 过滤，然后写入 rank。
 
 `list-item-chunks` / `delete-item-chunk` 当前规则：
 

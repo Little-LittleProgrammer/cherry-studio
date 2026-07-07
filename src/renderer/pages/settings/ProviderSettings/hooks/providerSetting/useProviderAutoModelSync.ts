@@ -1,6 +1,9 @@
 import { loggerService } from '@logger'
 import { useModels } from '@renderer/hooks/useModel'
 import { useProvider, useProviderApiKeys } from '@renderer/hooks/useProvider'
+import { enableProviderWhenModelsAvailable } from '@renderer/pages/settings/ProviderSettings/utils/providerEnablement'
+import { providerNeedsApiKeyForModelSync } from '@renderer/pages/settings/ProviderSettings/utils/providerModelSyncRequirements'
+import { isExternalCliProvider, isLoginBasedProvider } from '@shared/utils/provider'
 import { getProviderHostTopology } from '@shared/utils/providerTopology'
 import { useEffect, useMemo, useRef } from 'react'
 
@@ -12,7 +15,7 @@ const logger = loggerService.withContext('ProviderSettings:AutoModelSync')
 
 /** Triggers one automatic model sync when a provider becomes configured and has no local models. */
 export function useProviderAutoModelSync(providerId: string) {
-  const { provider } = useProvider(providerId)
+  const { provider, updateProvider } = useProvider(providerId)
   const { data: apiKeysData } = useProviderApiKeys(providerId)
   const { models } = useModels({ providerId }, { swrOptions: PROVIDER_SETTINGS_MODEL_SWR_OPTIONS })
   const { syncProviderModels, isSyncingModels } = useProviderModelSync(providerId, { existingModels: [...models] })
@@ -26,17 +29,7 @@ export function useProviderAutoModelSync(providerId: string) {
       return true
     }
 
-    // Must stay in lockstep with `providerNeedsApiKeyForModelSync` in
-    // ModelList/modelSync.ts. `api-key-aws` is intentionally NOT excluded:
-    // unlike `iam-aws` (IAM access keys), it authenticates with an
-    // AWS-issued bearer-token api-key and therefore needs an enabled key.
-    return !(
-      provider.id === 'ollama' ||
-      provider.id === 'lmstudio' ||
-      provider.id === 'copilot' ||
-      provider.authType === 'iam-gcp' ||
-      provider.authType === 'iam-aws'
-    )
+    return providerNeedsApiKeyForModelSync(provider)
   }, [provider])
 
   const initialModelSyncSignature = useMemo(() => {
@@ -63,6 +56,21 @@ export function useProviderAutoModelSync(providerId: string) {
       } as const
     }
 
+    // Chat-visible login providers (codex / grok-cli, OAuth) ship disabled and
+    // serve a registry catalog, so without this gate visiting their settings
+    // page would sync + enable them — surfacing model pickers before the user
+    // signs in. Their LoginOauthPanel flips `isEnabled` on confirmed login, so
+    // treat `isEnabled` as the "signed in" signal and defer sync until then.
+    // External-CLI providers (claude-code) are exempt: agent-only/undeletable
+    // and never chat-visible, they must stay enabled with their catalog
+    // materialized so agents can pick a model regardless of CLI login state.
+    if (isLoginBasedProvider(provider) && !isExternalCliProvider(provider) && !provider.isEnabled) {
+      return {
+        shouldSync: false,
+        reason: 'login_required'
+      } as const
+    }
+
     if (!topology.primaryBaseUrl.trim().length && provider.id !== 'vertexai') {
       return {
         shouldSync: false,
@@ -74,6 +82,13 @@ export function useProviderAutoModelSync(providerId: string) {
       return {
         shouldSync: false,
         reason: 'no_api_keys'
+      } as const
+    }
+
+    if (requiresApiKeyForModelSync) {
+      return {
+        shouldSync: false,
+        reason: 'uses_pull_reconcile'
       } as const
     }
 
@@ -142,12 +157,27 @@ export function useProviderAutoModelSync(providerId: string) {
       return
     }
 
+    // Re-entrancy guard against a double launch within the same render. React
+    // StrictMode invokes effects twice in dev, and `autoSyncDecision` is
+    // memoized — it does not observe the ref we set below — so both invocations
+    // would see `shouldSync: true` and fire two concurrent `/models` mutations
+    // on the same SWR hook instance. One then loses the race, SWR discards its
+    // (failed) result as `undefined`, and the caller spreads it ("created is not
+    // iterable"). The ref is the synchronous source of truth between invocations.
+    if (initialModelSyncSignatureRef.current === initialModelSyncSignature) {
+      return
+    }
+
     initialModelSyncSignatureRef.current = initialModelSyncSignature
-    void syncProviderModels().catch((error) => {
-      logger.error('Provider auto model sync failed', { providerId, error })
-      if (initialModelSyncSignatureRef.current === initialModelSyncSignature) {
-        initialModelSyncSignatureRef.current = null
-      }
-    })
-  }, [autoSyncDecision, initialModelSyncSignature, provider, providerId, syncProviderModels])
+    void syncProviderModels()
+      .then(async (syncedModels) => {
+        await enableProviderWhenModelsAvailable(provider, updateProvider, syncedModels.length, 'auto_model_sync')
+      })
+      .catch((error) => {
+        logger.error('Provider auto model sync failed', { providerId, error })
+        if (initialModelSyncSignatureRef.current === initialModelSyncSignature) {
+          initialModelSyncSignatureRef.current = null
+        }
+      })
+  }, [autoSyncDecision, initialModelSyncSignature, provider, providerId, syncProviderModels, updateProvider])
 }

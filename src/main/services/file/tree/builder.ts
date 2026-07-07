@@ -26,10 +26,9 @@ import path from 'node:path'
 
 import { loggerService } from '@logger'
 import { type Disposable, Emitter } from '@main/core/lifecycle'
-import { createDirectoryWatcher, type DirectoryWatcher, type WatcherEvent } from '@main/services/file/watcher'
+import type { FilePath } from '@shared/types/file'
 import {
   type DirectoryTreeOptions,
-  type FilePath,
   type SerializedTreeNode,
   TreeDir,
   TreeDirRoot,
@@ -37,8 +36,9 @@ import {
   type TreeMutationEvent,
   type TreeNode,
   type TreeNodeStats
-} from '@shared/file/types'
+} from '@shared/utils/file'
 
+import { createDirectoryWatcher, type DirectoryWatcher, type WatcherEvent } from '../watcher'
 import { type GitignorePredicate, loadGitignorePredicate } from './gitignore'
 import { listDirectory as searchListDirectory } from './search'
 
@@ -256,9 +256,12 @@ class DirectoryTreeBuilderImpl implements DirectoryTreeBuilder {
     const watcherIgnore = predicate
       ? (((p: FilePath) => predicate(normalizePath(p))) as (path: FilePath) => boolean)
       : undefined
+    const watcherMaxDepth =
+      this.options.maxDepth === Number.MAX_SAFE_INTEGER ? undefined : Math.max(0, this.options.maxDepth)
 
     const watcher = createDirectoryWatcher(this.rootPath as FilePath, {
       recursive: true,
+      maxDepth: watcherMaxDepth,
       stabilityThresholdMs: 200,
       ignore: watcherIgnore
     })

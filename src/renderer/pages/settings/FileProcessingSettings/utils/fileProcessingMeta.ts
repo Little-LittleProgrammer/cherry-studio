@@ -1,9 +1,9 @@
 import type { CompoundIcon } from '@cherrystudio/ui'
 import { Application, Doc2x, Intel, Mineru, Mistral, Paddleocr, TesseractJs } from '@cherrystudio/ui/icons'
-import { isWin } from '@renderer/config/constant'
-import { TESSERACT_LANG_MAP } from '@renderer/config/ocr'
+import { TESSERACT_LANG_MAP } from '@renderer/pages/settings/FileProcessingSettings/ocr'
+import { isWin } from '@renderer/utils/platform'
 import type { FileProcessorFeature, FileProcessorId } from '@shared/data/preference/preferenceTypes'
-import type { FileProcessorFeatureCapability, FileProcessorMerged } from '@shared/data/presets/file-processing'
+import type { FileProcessorFeatureCapability, FileProcessorMerged } from '@shared/data/presets/fileProcessing'
 
 export type FileProcessingMenuEntry = {
   key: string
@@ -23,11 +23,11 @@ const FILE_PROCESSING_FEATURE_SECTIONS: readonly {
 }[] = [
   {
     feature: 'image_to_text',
-    processors: ['system', 'tesseract', 'paddleocr', 'mistral', 'ovocr']
+    processors: ['system', 'paddleocr', 'tesseract', 'mistral', 'ovocr']
   },
   {
     feature: 'document_to_markdown',
-    processors: ['mistral', 'mineru', 'doc2x', 'open-mineru', 'paddleocr']
+    processors: ['mineru', 'paddleocr', 'doc2x', 'mistral', 'open-mineru']
   }
 ] as const
 
@@ -156,6 +156,10 @@ export function flattenFeatureSections(featureSections: FileProcessingFeatureSec
 
 export function getFileProcessingFeatureTitleKey(feature: FileProcessorFeature): string {
   return `settings.tool.file_processing.features.${feature}.title`
+}
+
+export function getFileProcessingFeatureTooltipKey(feature: FileProcessorFeature): string {
+  return `settings.tool.file_processing.features.${feature}.tooltip`
 }
 
 export function getProcessorNameKey(processorId: FileProcessorId): string {

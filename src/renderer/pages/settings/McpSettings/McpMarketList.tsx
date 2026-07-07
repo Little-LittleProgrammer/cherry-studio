@@ -1,11 +1,10 @@
 import { Composio, Glama, Higress, Mcp, Mcpso, Modelscope, Pulse, Smithery, Zhipu } from '@cherrystudio/ui/icons'
+import { SettingTitle } from '@renderer/components/SettingsPrimitives'
 import { cn } from '@renderer/utils/style'
 import { ExternalLink } from 'lucide-react'
 import type React from 'react'
 import type { FC } from 'react'
 import { useTranslation } from 'react-i18next'
-
-import { SettingTitle } from '..'
 
 const mcpMarkets = [
   {
@@ -135,7 +134,7 @@ const MarketHeader = ({ className, ...props }: React.ComponentPropsWithoutRef<'d
 )
 
 const MarketLogo = ({ className, ...props }: React.ComponentPropsWithoutRef<'img'>) => (
-  <img className={cn('h-[18px] w-[18px] rounded object-cover', className)} {...props} />
+  <img className={cn('h-4.5 w-4.5 rounded object-cover', className)} {...props} />
 )
 
 const MarketName = ({ className, ...props }: React.ComponentPropsWithoutRef<'span'>) => (

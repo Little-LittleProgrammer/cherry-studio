@@ -13,9 +13,9 @@ import path from 'node:path'
 
 import { application } from '@application'
 import { loggerService } from '@logger'
-import { copy as fsCopy, removeDir as fsRemoveDir } from '@main/utils/file/fs'
+import { copy as fsCopy, removeDir as fsRemoveDir } from '@main/utils/file'
 import type { FileEntryId } from '@shared/data/types/file'
-import type { FilePath } from '@shared/file/types'
+import type { FilePath } from '@shared/types/file'
 
 import { resolvePhysicalPath } from '../../utils/pathResolver'
 import type { FileManagerDeps } from '../deps'
@@ -27,7 +27,7 @@ export async function withTempCopy<T>(
   id: FileEntryId,
   fn: (tempPath: string) => Promise<T>
 ): Promise<T> {
-  const entry = await deps.fileEntryService.getById(id)
+  const entry = deps.fileEntryService.getById(id)
   const physical = resolvePhysicalPath(entry)
   // Centralised path: feature.files.tempcopy.temp is the parent dir; mkdtemp
   // appends a unique suffix per call so concurrent withTempCopy invocations

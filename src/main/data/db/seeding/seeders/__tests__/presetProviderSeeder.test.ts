@@ -15,7 +15,6 @@ import { setupTestDatabase } from '@test-helpers/db'
 import { describe, expect, it, vi } from 'vitest'
 
 // Fake registry providers — two preset providers: 'openai' and 'anthropic'.
-// The seeder always also adds 'cherryai' as a built-in.
 vi.mock('@cherrystudio/provider-registry/node', () => {
   class RegistryLoader {
     loadProviders() {
@@ -51,9 +50,9 @@ vi.mock('@cherrystudio/provider-registry', async () => {
 describe('PresetProviderSeeder.run — insert-only behavior', () => {
   const dbh = setupTestDatabase()
 
-  it('should insert all preset providers (plus cherryai) when DB is empty', async () => {
+  it('should insert all preset providers when DB is empty', async () => {
     const seed = new PresetProviderSeeder()
-    await seed.run(dbh.db)
+    seed.run(dbh.db)
 
     const rows = await dbh.db.select().from(userProviderTable)
     const ids = rows.map((r) => r.providerId)
@@ -62,12 +61,12 @@ describe('PresetProviderSeeder.run — insert-only behavior', () => {
     expect(ids).toContain('azure-openai')
     expect(ids).toContain('vertexai')
     expect(ids).toContain('aws-bedrock')
-    expect(ids).toContain('cherryai')
+    expect(ids).not.toContain('cherryai')
   })
 
   it('should seed special provider defaults without relying on providers.json endpoint metadata', async () => {
     const seed = new PresetProviderSeeder()
-    await seed.run(dbh.db)
+    seed.run(dbh.db)
 
     const rows = await dbh.db.select().from(userProviderTable)
     const azure = rows.find((r) => r.providerId === 'azure-openai')
@@ -88,7 +87,7 @@ describe('PresetProviderSeeder.run — insert-only behavior', () => {
       .values({ providerId: 'openai', name: 'User-renamed OpenAI', orderKey: generateOrderKeyBetween(null, null) })
 
     const seed = new PresetProviderSeeder()
-    await seed.run(dbh.db)
+    seed.run(dbh.db)
 
     const rows = await dbh.db.select().from(userProviderTable)
     const openai = rows.find((r) => r.providerId === 'openai')
@@ -97,23 +96,22 @@ describe('PresetProviderSeeder.run — insert-only behavior', () => {
 
     const ids = rows.map((r) => r.providerId)
     expect(ids).toContain('anthropic')
-    expect(ids).toContain('cherryai')
+    expect(ids).not.toContain('cherryai')
   })
 
-  it('should not insert anything when all providers (including cherryai) already exist', async () => {
-    const [openaiKey, anthropicKey, azureKey, vertexKey, bedrockKey, cherryaiKey] = generateOrderKeySequence(6)
+  it('should not insert anything when all registry providers already exist', async () => {
+    const [openaiKey, anthropicKey, azureKey, vertexKey, bedrockKey] = generateOrderKeySequence(5)
     await dbh.db.insert(userProviderTable).values([
       { providerId: 'openai', name: 'OpenAI', orderKey: openaiKey },
       { providerId: 'anthropic', name: 'Anthropic', orderKey: anthropicKey },
       { providerId: 'azure-openai', name: 'Azure OpenAI', orderKey: azureKey },
       { providerId: 'vertexai', name: 'Vertex AI', orderKey: vertexKey },
-      { providerId: 'aws-bedrock', name: 'AWS Bedrock', orderKey: bedrockKey },
-      { providerId: 'cherryai', name: 'CherryAI', orderKey: cherryaiKey }
+      { providerId: 'aws-bedrock', name: 'AWS Bedrock', orderKey: bedrockKey }
     ])
     const before = await dbh.db.select().from(userProviderTable)
 
     const seed = new PresetProviderSeeder()
-    await seed.run(dbh.db)
+    seed.run(dbh.db)
 
     const after = await dbh.db.select().from(userProviderTable)
     expect(after).toHaveLength(before.length)

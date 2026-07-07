@@ -18,7 +18,7 @@ import {
 } from '@cherrystudio/ui'
 import ModelAvatar from '@renderer/components/Avatar/ModelAvatar'
 import CopyButton from '@renderer/components/CopyButton'
-import { useAssistants, useDefaultAssistant } from '@renderer/hooks/useAssistant'
+import { useAssistants } from '@renderer/hooks/useAssistant'
 import { useDefaultModel } from '@renderer/hooks/useModel'
 import { cn } from '@renderer/utils/style'
 import type { SelectionActionItem } from '@shared/data/preference/preferenceTypes'
@@ -44,8 +44,9 @@ const SelectionActionUserModal: FC<SelectionActionUserModalProps> = ({
 }) => {
   const { t } = useTranslation()
   const { assistants: userPredefinedAssistants } = useAssistants()
-  const { assistant: defaultAssistant } = useDefaultAssistant()
   const { defaultModel } = useDefaultModel()
+  const assistantOptions = userPredefinedAssistants
+  const firstAssistantId = assistantOptions[0]?.id
 
   const [formData, setFormData] = useState<Partial<SelectionActionItem>>({})
   const [errors, setErrors] = useState<Partial<Record<keyof SelectionActionItem, string>>>({})
@@ -109,7 +110,7 @@ const SelectionActionUserModal: FC<SelectionActionUserModalProps> = ({
 
   return (
     <Dialog open={isModalOpen} onOpenChange={(next) => !next && onCancel()}>
-      <DialogContent className="sm:max-w-[520px]">
+      <DialogContent closeOnOverlayClick={false} className="sm:max-w-130">
         <DialogHeader>
           <DialogTitle>
             {editingAction
@@ -144,7 +145,7 @@ const SelectionActionUserModal: FC<SelectionActionUserModalProps> = ({
                     href="https://lucide.dev/icons/"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-[var(--color-primary)] text-xs">
+                    className="text-primary text-xs">
                     {t('selection.settings.user_modal.icon.view_all')}
                   </a>
                   <Tooltip content={t('selection.settings.user_modal.icon.random')}>
@@ -191,7 +192,7 @@ const SelectionActionUserModal: FC<SelectionActionUserModalProps> = ({
               <RadioGroup
                 value={formData.assistantId ? 'assistant' : 'default'}
                 onValueChange={(value) =>
-                  handleInputChange('assistantId', value === 'default' ? '' : defaultAssistant.id)
+                  handleInputChange('assistantId', value === 'default' ? '' : (firstAssistantId ?? ''))
                 }
                 className="flex flex-row gap-4">
                 <label className="flex items-center gap-2 text-sm">
@@ -211,32 +212,25 @@ const SelectionActionUserModal: FC<SelectionActionUserModalProps> = ({
               <ModalSectionTitle>
                 <ModalSectionTitleLabel>{t('selection.settings.user_modal.assistant.label')}</ModalSectionTitleLabel>
               </ModalSectionTitle>
-              <Select
-                value={formData.assistantId || defaultAssistant.id}
-                onValueChange={(value) => handleInputChange('assistantId', value)}>
+              <Select value={formData.assistantId} onValueChange={(value) => handleInputChange('assistantId', value)}>
                 <SelectTrigger className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem key={defaultAssistant.id} value={defaultAssistant.id}>
-                    <AssistantItem>
-                      <ModelAvatar model={defaultModel} size={18} />
-                      <AssistantName>{defaultAssistant.name}</AssistantName>
-                      <Spacer />
-                      <CurrentTag isCurrent={true}>{t('selection.settings.user_modal.assistant.default')}</CurrentTag>
-                    </AssistantItem>
-                  </SelectItem>
-                  {userPredefinedAssistants
-                    .filter((a) => a.id !== defaultAssistant.id)
-                    .map((a) => (
-                      <SelectItem key={a.id} value={a.id}>
-                        <AssistantItem>
-                          <ModelAvatar model={defaultModel} size={18} />
-                          <AssistantName>{a.name}</AssistantName>
-                          <Spacer />
-                        </AssistantItem>
-                      </SelectItem>
-                    ))}
+                  {assistantOptions.map((a) => (
+                    <SelectItem key={a.id} value={a.id}>
+                      <AssistantItem>
+                        <ModelAvatar model={defaultModel} size={18} />
+                        <AssistantName>{a.name}</AssistantName>
+                        <Spacer />
+                        {firstAssistantId === a.id && (
+                          <CurrentTag isCurrent={true}>
+                            {t('selection.settings.user_modal.assistant.default')}
+                          </CurrentTag>
+                        )}
+                      </AssistantItem>
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </ModalSection>
@@ -248,7 +242,7 @@ const SelectionActionUserModal: FC<SelectionActionUserModalProps> = ({
                 <QuestionIcon size={14} />
               </Tooltip>
               <Spacer />
-              <div className="flex select-text items-center gap-1 text-(--color-foreground-secondary) text-xs">
+              <div className="flex select-text items-center gap-1 text-foreground-secondary text-xs">
                 {t('selection.settings.user_modal.prompt.placeholder_text')} {'{{text}}'}
                 <CopyButton
                   tooltip={t('selection.settings.user_modal.prompt.copy_placeholder')}
@@ -332,7 +326,7 @@ const CurrentTag = ({
 const DiceButton = ({ className, ...props }: React.ComponentPropsWithoutRef<'div'>) => (
   <div
     className={cn(
-      'ml-1 flex cursor-pointer items-center justify-center transition-all active:rotate-[720deg] [&_.btn-icon]:text-foreground-secondary hover:[&_.btn-icon]:text-primary',
+      'ml-1 flex cursor-pointer items-center justify-center transition-all active:rotate-720 [&_.btn-icon]:text-foreground-secondary hover:[&_.btn-icon]:text-primary',
       className
     )}
     {...props}

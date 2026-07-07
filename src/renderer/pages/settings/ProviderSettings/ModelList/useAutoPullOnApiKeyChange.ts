@@ -1,15 +1,22 @@
 import { useModels } from '@renderer/hooks/useModel'
-import { useProviderApiKeys } from '@renderer/hooks/useProvider'
+import { useProvider, useProviderApiKeys } from '@renderer/hooks/useProvider'
+import { getProviderHostTopology } from '@shared/utils/providerTopology'
 import { useEffect, useMemo, useRef } from 'react'
 
+import { providerNeedsApiKeyForModelSync } from '../utils/providerModelSyncRequirements'
+
 /**
- * Fires `onTrigger` once whenever the provider's enabled API-key fingerprint
- * changes — but only after the first render and only when local models already
- * exist (first-time bootstrap is owned by `useProviderAutoModelSync`).
+ * Fires `onTrigger` once whenever the provider's enabled API-key fingerprint OR
+ * its host (endpoint/baseUrl/authType) changes. For API-key providers this also
+ * fires on first render when no local models exist (first-time bootstrap uses
+ * the pull-reconcile sidebar instead of direct auto-sync). A pull still requires
+ * at least one enabled key for providers whose model sync needs API-key auth,
+ * so disabling the only key never fires for those providers.
  */
 export function useAutoPullOnApiKeyChange(providerId: string, onTrigger: () => void | Promise<void>) {
+  const { provider } = useProvider(providerId)
   const { data: apiKeysData } = useProviderApiKeys(providerId)
-  const { models } = useModels({ providerId })
+  const { models, isLoading } = useModels({ providerId })
 
   const enabledKeySignature = useMemo(
     () =>
@@ -21,6 +28,17 @@ export function useAutoPullOnApiKeyChange(providerId: string, onTrigger: () => v
     [apiKeysData]
   )
 
+  const hostSignature = useMemo(() => {
+    if (!provider) return ''
+    const topology = getProviderHostTopology(provider)
+    return [topology.primaryEndpoint, topology.primaryBaseUrl, topology.anthropicBaseUrl, provider.authType ?? ''].join(
+      '|'
+    )
+  }, [provider])
+
+  const changeSignature = `${hostSignature}::${enabledKeySignature}`
+  const requiresApiKeyForModelSync = provider ? providerNeedsApiKeyForModelSync(provider) : true
+
   const lastSignatureRef = useRef<string | null>(null)
   const onTriggerRef = useRef(onTrigger)
 
@@ -29,20 +47,29 @@ export function useAutoPullOnApiKeyChange(providerId: string, onTrigger: () => v
   }, [onTrigger])
 
   useEffect(() => {
-    // Until api-keys resolve, the signature is the cold-cache empty string ('');
-    // recording that as the baseline would make the later undefined→keys
-    // transition look like a user-initiated key change and auto-fire the pull.
-    if (apiKeysData === undefined) return
+    if (!provider || apiKeysData === undefined || isLoading) return
     if (lastSignatureRef.current === null) {
-      lastSignatureRef.current = enabledKeySignature
+      lastSignatureRef.current = changeSignature
+      if (models.length === 0 && requiresApiKeyForModelSync && enabledKeySignature) {
+        void onTriggerRef.current()
+      }
       return
     }
-    if (lastSignatureRef.current === enabledKeySignature) {
+    if (lastSignatureRef.current === changeSignature) {
       return
     }
-    lastSignatureRef.current = enabledKeySignature
-    if (!enabledKeySignature) return
-    if (models.length === 0) return
+    lastSignatureRef.current = changeSignature
+    // Key-required providers still need an enabled key; disabling the only key must not fire.
+    if (requiresApiKeyForModelSync && !enabledKeySignature) return
+    if (models.length === 0 && !requiresApiKeyForModelSync) return
     void onTriggerRef.current()
-  }, [apiKeysData, enabledKeySignature, models.length])
+  }, [
+    apiKeysData,
+    changeSignature,
+    enabledKeySignature,
+    isLoading,
+    models.length,
+    provider,
+    requiresApiKeyForModelSync
+  ])
 }

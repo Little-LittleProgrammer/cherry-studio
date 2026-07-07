@@ -3,6 +3,7 @@ import { agentChannelTable, agentChannelTaskTable } from '@data/db/schemas/agent
 import { agentSessionTable } from '@data/db/schemas/agentSession'
 import { agentSessionMessageTable } from '@data/db/schemas/agentSessionMessage'
 import { agentSkillTable } from '@data/db/schemas/agentSkill'
+import { agentMcpServerTable } from '@data/db/schemas/assistantRelations'
 import { loggerService } from '@logger'
 import { eq, sql } from 'drizzle-orm'
 import type { SQLiteTable } from 'drizzle-orm/sqlite-core'
@@ -24,23 +25,24 @@ export const AGENT_TABLES: SQLiteTable[] = [
   agentSkillTable,
   agentChannelTable,
   agentSessionMessageTable,
-  agentChannelTaskTable
+  agentChannelTaskTable,
+  agentMcpServerTable
 ]
 
 /**
  * Remap old prefix IDs and hardcoded builtin IDs to UUID v4, updating all FK references.
  *
- * Runs inside AgentsMigrator's ATTACH window, so it uses manual BEGIN/COMMIT — never
- * `db.transaction()`, which would swap to a fresh libsql connection, making `agents_legacy`
- * invisible and breaking the subsequent DETACH. Foreign keys are already OFF for the entire
- * migration (MigrationDbService registers `foreign_keys = OFF` via setPragma), so this does
+ * Runs inside AgentsMigrator's ATTACH window, so it uses manual BEGIN/COMMIT to keep every
+ * statement on the same connection that holds `agents_legacy` attached, bracketed by the
+ * surrounding ATTACH/DETACH. Foreign keys are already OFF for the entire
+ * migration (MigrationDbService sets `foreign_keys = OFF` once on its single connection), so this does
  * not toggle FK itself; AgentsMigrator asserts agent-domain FK integrity via
  * `assertOwnedForeignKeys(AGENT_TABLES)` after this returns. Idempotent.
  */
 export async function remapAgentPrefixIds(db: MigrationContext['db']): Promise<void> {
   let committed = false
   try {
-    await db.run(sql.raw('BEGIN'))
+    db.run(sql.raw('BEGIN'))
 
     const oldAgents = await db
       .select({ id: agentTable.id })
@@ -55,10 +57,11 @@ export async function remapAgentPrefixIds(db: MigrationContext['db']): Promise<v
       await db.update(agentSessionTable).set({ agentId: newId }).where(eq(agentSessionTable.agentId, oldId))
       await db.update(agentSkillTable).set({ agentId: newId }).where(eq(agentSkillTable.agentId, oldId))
       await db.update(agentChannelTable).set({ agentId: newId }).where(eq(agentChannelTable.agentId, oldId))
+      await db.update(agentMcpServerTable).set({ agentId: newId }).where(eq(agentMcpServerTable.agentId, oldId))
       // job_schedule.jobInputTemplate is a JSON column carrying the same agent_id
       // for migrated agent.task schedules. json_set rewrites it atomically so
       // post-remap reads see the new id consistently with agent.id above.
-      await db.run(sql`
+      db.run(sql`
         UPDATE job_schedule
         SET job_input_template = json_set(job_input_template, '$.agentId', ${newId})
         WHERE type = 'agent.task'
@@ -85,12 +88,12 @@ export async function remapAgentPrefixIds(db: MigrationContext['db']): Promise<v
       await db.update(agentChannelTable).set({ sessionId: newId }).where(eq(agentChannelTable.sessionId, oldId))
     }
 
-    await db.run(sql.raw('COMMIT'))
+    db.run(sql.raw('COMMIT'))
     committed = true
   } catch (error) {
     if (!committed) {
       try {
-        await db.run(sql.raw('ROLLBACK'))
+        db.run(sql.raw('ROLLBACK'))
       } catch (rollbackError) {
         logger.error(
           'ROLLBACK failed in remapAgentPrefixIds — DB may be in an inconsistent state',

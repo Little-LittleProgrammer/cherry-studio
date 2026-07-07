@@ -20,18 +20,18 @@ Two independent main-process lifecycle services:
 Each queue has a `DispatchQueue` instance holding `{ name, concurrency, mutex }`. The dispatch loop (`JobManager.dispatch`):
 
 1. Acquire **Layer 1** per-queue mutex *first*
-2. Acquire **Layer 0** global mutex *second*
-3. Inside one DB transaction:
+2. Enter **Layer 0** — the synchronous `BEGIN IMMEDIATE` write transaction (`withWriteTx`) — *second*
+3. Inside that one DB transaction:
    - Count queue-active jobs → check `queue.concurrency`
    - Count globally-running jobs → check `globalMaxConcurrency`
    - SELECT next pending → UPDATE to running (claim)
-4. Release both mutexes (global first, then per-queue, reverse acquisition order)
+4. The Layer 0 transaction commits, then release the Layer 1 per-queue mutex
 5. Spawn `handler.execute` outside the lock
 6. Queue a microtask to dispatch the same queue again (fill next slot)
 
-Spawning happens *outside* the mutex — the handler executes for seconds/minutes while new dispatches proceed.
+Spawning happens *outside* the lock — the handler executes for seconds/minutes while new dispatches proceed.
 
-**Lock acquisition order is fixed** (per-queue then global). All call sites use this order so the two layers cannot deadlock against each other.
+**Acquisition order is fixed** (Layer 1 mutex, then the Layer 0 write transaction). Layer 0 holds no async lock — it is a synchronous transaction — so Layer 1 is the only mutex in the dispatch path and the two layers cannot deadlock against each other.
 
 ## Six-state state machine
 
@@ -56,7 +56,7 @@ Startup recovery is JobManager's deferred sweep that reconciles the DB-driven st
 1. `JobManager.onAllReady()` schedules a `setTimeout` with a 60-second "quiet window" and returns synchronously. `LifecycleManager.allReady()` is fire-and-forget; bootstrap is not blocked.
 2. After 60 s, the timer callback assigns the recovery flow promise to `this._recoveryDone` (only if shutdown has not been requested) and the flow starts running.
 3. The flow runs four IO steps in order:
-   1. `runStartupRecovery(handlers)` — resets non-terminal rows per handler recovery strategy (`abandon` / `retry` / `singleton`); `cancelRequested=true` overrides every strategy.
+   1. `runStartupRecovery(handlers, isJobInFlight)` — resets non-terminal rows per handler recovery strategy (`abandon` / `retry` / `singleton`); `cancelRequested=true` overrides every strategy. Rows the current process is **already executing** (reported via `isJobInFlight`, backed by `JobManager.inFlightExecuted`) are excluded before any strategy, so a job enqueued during the quiet window and still running when the sweep fires is never reset or re-dispatched (#16291).
    2. **Resurrect queues** — walks distinct `(queue, type)` pairs over non-terminal rows and ensures a `DispatchQueue` exists for each. Without this step `dispatchAll` would iterate an empty `queues` map and pending rows would wait until the next `enqueue`.
    3. **Catch-up THEN arm** — calls `detectAndDispatchOverdue(schedules)` *before* `armSchedule(schedule)` for every enabled schedule. The order is load-bearing: if we armed first, a cron with `protect: true` could fire its natural calendar concurrently with a catch-up enqueue (`protect` only blocks overlapping callbacks, not external callers). Sequencing catch-up first guarantees the make-up enqueue lands before croner's first natural fire.
    4. `dispatchAll()` kicks every per-queue pump so pending rows reset by step 1 start running immediately rather than waiting on the next enqueue.
@@ -88,7 +88,7 @@ We considered BullMQ / bee-queue / better-queue / agenda / graphile-worker / bre
 - Race safety needs only one mutex pair (Layer 0 + Layer 1) around `count → claim`
 - No double-source-of-truth bookkeeping (PQueue + DB) and its sync discipline
 
-Throughput: ~200 dispatch/s at single-process libsql throughput, well above Cherry Studio's largest scenario (1000+ knowledge bases, each with concurrency=5, never exceeds globalMaxConcurrency=50 simultaneous running jobs).
+Throughput: ~200 dispatch/s at single-process better-sqlite3 throughput, well above Cherry Studio's largest scenario (1000+ knowledge bases, each with concurrency=5, never exceeds globalMaxConcurrency=50 simultaneous running jobs).
 
 ## Strongly-typed JobRegistry
 
@@ -109,6 +109,19 @@ After this declaration:
 - Renaming a type surfaces every call site via the TypeScript error pipeline
 - Wrong payload shape is a compile error
 
+## Transactional enqueue (`enqueueTx`)
+
+`enqueue` persists the row on the bare connection — fine when the enqueue is the only write. When a business-state flip and the job INSERT must commit atomically (e.g. mark items `deleting` **and** enqueue the purge job), use the transactional variant inside a `DbService.withWriteTx` callback:
+
+```ts
+application.get('DbService').withWriteTx((tx) => {
+  itemService.setStatusTx(tx, ids, 'deleting') // business write
+  return jobManager.enqueueTx(tx, 'my.purge', { ids }) // job INSERT, same tx
+})
+```
+
+Post-commit side effects (state publish, dispatch / delayed arming) are deferred one microtask past the synchronous transaction. On rollback the row never existed: the returned handle's `finished` never resolves, and an idempotency-key unique-index collision aborts the whole caller transaction. See the `enqueueTx` JSDoc for the full contract.
+
 ## Renderer-side consumers
 
 The renderer never enqueues, cancels, or otherwise mutates jobs through the DataApi. It only observes job state read-only:
@@ -120,7 +133,7 @@ Triggering a job is owned by the relevant business module in main:
 
 1. The business service decides the semantics — which job type, what payload, queue, idempotency key, max attempts, timeout.
 2. It calls `application.get('JobManager').enqueue(...)` directly.
-3. If the renderer needs to initiate the work, the business module exposes a dedicated IPC channel (e.g. `IpcChannel.Knowledge_IndexFile`); the IPC handler internally calls `JobManager.enqueue(...)`.
+3. If the renderer needs to initiate the work, the business module exposes a dedicated IPC route (e.g. the `knowledge.add_items` IpcApi route); the route handler internally calls `JobManager.enqueue(...)`.
 
 This keeps `JobRegistry`'s compile-time `JobPayloadOf<K>` type safety intact and prevents the renderer from depending on JobManager infrastructure details (queue names, retry policies, idempotency keys).
 

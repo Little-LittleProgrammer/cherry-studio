@@ -1,5 +1,4 @@
-import type { InstalledSkill } from '@renderer/types'
-import { act, renderHook } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const useQueryMock = vi.hoisted(() => vi.fn())
@@ -9,6 +8,7 @@ const uninstallSkillMock = vi.hoisted(() => vi.fn())
 const installSkillMock = vi.hoisted(() => vi.fn())
 const installSkillFromZipMock = vi.hoisted(() => vi.fn())
 const installSkillFromDirectoryMock = vi.hoisted(() => vi.fn())
+const listLocalSkillsMock = vi.hoisted(() => vi.fn())
 const toastErrorMock = vi.hoisted(() => vi.fn())
 
 vi.mock('@data/hooks/useDataApi', () => ({
@@ -16,7 +16,10 @@ vi.mock('@data/hooks/useDataApi', () => ({
   useInvalidateCache: () => invalidateMock
 }))
 
-import { useInstalledSkills, useSkillInstall } from '../useSkills'
+import type { InstalledSkill } from '@shared/types/skill'
+
+import { SKILL_SEARCH_FAILED_ERROR } from '../../utils/skillSearch'
+import { useAvailableSkills, useInstalledSkills, useSkillInstall, useSkillSearch } from '../useSkills'
 
 function createSkill(overrides: Partial<InstalledSkill> = {}): InstalledSkill {
   return {
@@ -61,11 +64,13 @@ describe('useInstalledSkills', () => {
       data: createSkill({ id: skillId, isEnabled, updatedAt: '2024-01-02T00:00:00.000Z' })
     }))
     uninstallSkillMock.mockResolvedValue({ success: true, data: undefined })
+    listLocalSkillsMock.mockResolvedValue({ success: true, data: [] })
 
     vi.stubGlobal('api', {
       skill: {
         toggle: toggleSkillMock,
-        uninstall: uninstallSkillMock
+        uninstall: uninstallSkillMock,
+        listLocal: listLocalSkillsMock
       }
     })
     vi.stubGlobal('toast', { error: toastErrorMock })
@@ -150,6 +155,58 @@ describe('useInstalledSkills', () => {
     })
     expect(toastErrorMock).toHaveBeenCalledWith('uninstall failed')
   })
+
+  it('combines enabled installed skills with local workspace skills', async () => {
+    useQueryMock.mockReturnValue({
+      data: [
+        createSkill({ id: 'global-on', name: 'PDF', folderName: 'pdf', isEnabled: true }),
+        createSkill({ id: 'global-off', name: 'Docx', folderName: 'docx', isEnabled: false })
+      ],
+      isLoading: false,
+      isRefreshing: false,
+      error: undefined,
+      refetch: vi.fn(),
+      mutate: vi.fn()
+    })
+    listLocalSkillsMock.mockResolvedValue({
+      success: true,
+      data: [{ name: 'repo-skill', filename: 'repo-skill', description: 'Repo skill' }]
+    })
+
+    const { result } = renderHook(() => useAvailableSkills('agent-1', '/repo'))
+
+    await waitFor(() => expect(listLocalSkillsMock).toHaveBeenCalledWith('/repo'))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    expect(result.current.skills).toEqual([
+      expect.objectContaining({ name: 'PDF', filename: 'pdf' }),
+      expect.objectContaining({ name: 'repo-skill', filename: 'repo-skill' })
+    ])
+  })
+
+  it('dedupes local skills already represented by enabled global skills', async () => {
+    useQueryMock.mockReturnValue({
+      data: [createSkill({ id: 'global-pdf', name: 'PDF', folderName: 'pdf', isEnabled: true })],
+      isLoading: false,
+      isRefreshing: false,
+      error: undefined,
+      refetch: vi.fn(),
+      mutate: vi.fn()
+    })
+    listLocalSkillsMock.mockResolvedValue({
+      success: true,
+      data: [
+        { name: 'Local PDF', filename: 'pdf', description: 'Same directory' },
+        { name: 'repo-skill', filename: 'repo-skill', description: 'Repo skill' }
+      ]
+    })
+
+    const { result } = renderHook(() => useAvailableSkills('agent-1', '/repo'))
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    expect(result.current.skills.map((skill) => skill.filename)).toEqual(['pdf', 'repo-skill'])
+  })
 })
 
 describe('useSkillInstall', () => {
@@ -195,6 +252,52 @@ describe('useSkillInstall', () => {
     expect(invalidateMock).toHaveBeenCalledWith('/skills')
   })
 
+  it('tracks multiple remote skill installs independently', async () => {
+    const pendingInstalls = new Map<string, (value: { success: true; data: InstalledSkill }) => void>()
+    installSkillMock.mockImplementation(
+      ({ installSource }: { installSource: string }) =>
+        new Promise((resolve) => {
+          pendingInstalls.set(installSource, resolve)
+        })
+    )
+    const { result } = renderHook(() => useSkillInstall())
+
+    let firstInstall!: ReturnType<typeof result.current.install>
+    let secondInstall!: ReturnType<typeof result.current.install>
+    act(() => {
+      firstInstall = result.current.install('skills.sh:owner/repo/first')
+      secondInstall = result.current.install('skills.sh:owner/repo/second')
+    })
+
+    await waitFor(() => {
+      expect(result.current.isInstalling('skills.sh:owner/repo/first')).toBe(true)
+      expect(result.current.isInstalling('skills.sh:owner/repo/second')).toBe(true)
+      expect(result.current.isInstalling()).toBe(true)
+    })
+
+    await act(async () => {
+      pendingInstalls.get('skills.sh:owner/repo/first')?.({
+        success: true,
+        data: createSkill({ id: 'skill-first' })
+      })
+      await firstInstall
+    })
+
+    expect(result.current.isInstalling('skills.sh:owner/repo/first')).toBe(false)
+    expect(result.current.isInstalling('skills.sh:owner/repo/second')).toBe(true)
+    expect(result.current.isInstalling()).toBe(true)
+
+    await act(async () => {
+      pendingInstalls.get('skills.sh:owner/repo/second')?.({
+        success: true,
+        data: createSkill({ id: 'skill-second' })
+      })
+      await secondInstall
+    })
+
+    expect(result.current.isInstalling()).toBe(false)
+  })
+
   it('returns installed skill when DataApi cache invalidation fails after IPC success', async () => {
     invalidateMock.mockRejectedValueOnce(new Error('refresh failed'))
     const { result } = renderHook(() => useSkillInstall())
@@ -238,5 +341,27 @@ describe('useSkillInstall', () => {
       await expect(result.current.installFromDirectory('/tmp/bad-dir')).rejects.toThrow('directory failed')
     })
     expect(toastErrorMock).toHaveBeenCalledWith('directory failed')
+  })
+})
+
+describe('useSkillSearch', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('surfaces an error when every marketplace registry fails', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('network down'))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result } = renderHook(() => useSkillSearch())
+
+    await act(async () => {
+      await result.current.search('react')
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(result.current.results).toEqual([])
+    expect(result.current.searching).toBe(false)
+    expect(result.current.error).toBe(SKILL_SEARCH_FAILED_ERROR)
   })
 })

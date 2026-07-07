@@ -1,5 +1,6 @@
 import { useInvalidateCache, useMutation, useQuery } from '@data/hooks/useDataApi'
 import { loggerService } from '@logger'
+import { ipcApi } from '@renderer/ipc'
 import type { UpdateKnowledgeBaseDto } from '@shared/data/api/schemas/knowledges'
 import { KNOWLEDGE_BASES_MAX_LIMIT } from '@shared/data/api/schemas/knowledges'
 import type { CreateKnowledgeBaseDto, RestoreKnowledgeBaseDto } from '@shared/data/types/knowledge'
@@ -20,10 +21,7 @@ const normalizeError = (error: unknown): Error => {
   return new Error(String(error))
 }
 
-export type CreateKnowledgeBaseInput = Pick<
-  CreateKnowledgeBaseDto,
-  'name' | 'groupId' | 'embeddingModelId' | 'dimensions'
->
+export type CreateKnowledgeBaseInput = Pick<CreateKnowledgeBaseDto, 'name' | 'groupId'>
 export type RestoreKnowledgeBaseInput = Pick<
   RestoreKnowledgeBaseDto,
   'sourceBaseId' | 'name' | 'embeddingModelId' | 'dimensions'
@@ -55,30 +53,18 @@ export const useCreateKnowledgeBase = () => {
 
       const name = input.name.trim()
       const groupId = input.groupId?.trim()
-      const embeddingModelId = input.embeddingModelId?.trim()
-      const dimensions = input.dimensions
 
       if (!name) {
         throw new Error('Knowledge base name is required')
       }
 
-      if (!embeddingModelId) {
-        throw new Error('Knowledge base embedding model is required')
-      }
-
-      if (!Number.isInteger(dimensions) || dimensions <= 0) {
-        throw new Error(`Knowledge base dimensions must be a positive integer, received "${input.dimensions}"`)
-      }
-
+      // The embedding model is optional: a base created without one is BM25-only
+      // and gets its model later from the RAG settings. Configure it there, not here.
       const body: {
         name: string
-        embeddingModelId: string
-        dimensions: number
         groupId?: string
       } = {
-        name,
-        embeddingModelId,
-        dimensions
+        name
       }
 
       if (groupId) {
@@ -88,7 +74,7 @@ export const useCreateKnowledgeBase = () => {
       setIsCreating(true)
 
       try {
-        const createdBase = await window.api.knowledgeRuntime.createBase(body)
+        const createdBase = await ipcApi.request('knowledge.create_base', { base: body })
 
         try {
           await invalidateCache('/knowledge-bases')
@@ -104,8 +90,7 @@ export const useCreateKnowledgeBase = () => {
         const normalizedError = normalizeError(error)
         logger.error('Failed to create knowledge base', normalizedError, {
           name,
-          groupId,
-          embeddingModelId
+          groupId
         })
         setCreateError(normalizedError)
         setIsCreating(false)
@@ -155,7 +140,7 @@ export const useRestoreKnowledgeBase = () => {
       setIsRestoring(true)
 
       try {
-        const restoredBase = await window.api.knowledgeRuntime.restoreBase({
+        const result = await ipcApi.request('knowledge.restore_base', {
           sourceBaseId,
           name,
           embeddingModelId,
@@ -167,12 +152,12 @@ export const useRestoreKnowledgeBase = () => {
         } catch (invalidateError) {
           logger.error('Failed to refresh knowledge base list after restore', normalizeError(invalidateError), {
             sourceBaseId,
-            restoredBaseId: restoredBase.id
+            restoredBaseId: result.base.id
           })
         }
 
         setIsRestoring(false)
-        return restoredBase
+        return result
       } catch (error) {
         const normalizedError = normalizeError(error)
         logger.error('Failed to restore knowledge base', normalizedError, {
@@ -242,7 +227,7 @@ export const useDeleteKnowledgeBase = () => {
       let mutationError: Error | undefined
 
       try {
-        await window.api.knowledgeRuntime.deleteBase(baseId)
+        await ipcApi.request('knowledge.delete_base', { baseId })
       } catch (error) {
         const normalizedError = normalizeError(error)
         logger.error('Failed to delete knowledge base', normalizedError, {

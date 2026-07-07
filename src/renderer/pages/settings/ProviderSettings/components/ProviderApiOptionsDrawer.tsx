@@ -1,8 +1,12 @@
 import { Button, Input, PageSidePanelItem, Switch, Tooltip } from '@cherrystudio/ui'
 import { useProvider } from '@renderer/hooks/useProvider'
-import { cn } from '@renderer/utils'
+import { cn } from '@renderer/utils/style'
+import {
+  ANTHROPIC_CACHE_DEFAULT_LAST_N_MESSAGES,
+  ANTHROPIC_CACHE_DEFAULT_TOKEN_THRESHOLD
+} from '@shared/ai/anthropicCache'
 import type { Provider, RuntimeApiFeatures } from '@shared/data/types/provider'
-import { isAnthropicSupportedProvider, isAzureOpenAIProvider, isOpenAICompatibleProvider } from '@shared/utils/provider'
+import { isAnthropicSupportedProvider } from '@shared/utils/provider'
 import { Info } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -10,6 +14,7 @@ import { useTranslation } from 'react-i18next'
 import ProviderActions from '../primitives/ProviderActions'
 import ProviderSettingsDrawer from '../primitives/ProviderSettingsDrawer'
 import { drawerClasses } from '../primitives/ProviderSettingsPrimitives'
+import { getProviderApiOptionsVisibility } from '../utils/providerApiOptions'
 
 interface ProviderApiOptionsDrawerProps {
   providerId: string
@@ -57,17 +62,14 @@ function OptionTitle({ id, label, help }: { id: string; label: string; help: str
   )
 }
 
-function isOpenAIOptionsProvider(provider: Provider): boolean {
-  return isOpenAICompatibleProvider(provider) || isAzureOpenAIProvider(provider)
-}
-
 export default function ProviderApiOptionsDrawer({ providerId, open, onClose }: ProviderApiOptionsDrawerProps) {
   const { t } = useTranslation()
   const { provider, updateProvider } = useProvider(providerId)
 
   const cacheControl = provider?.settings?.cacheControl
-  const cacheTokenThreshold = cacheControl?.tokenThreshold ?? 0
-  const cacheLastNMessages = cacheControl?.cacheLastNMessages ?? 0
+  const cacheTokenThreshold =
+    cacheControl?.enabled === false ? 0 : (cacheControl?.tokenThreshold ?? ANTHROPIC_CACHE_DEFAULT_TOKEN_THRESHOLD)
+  const cacheLastNMessages = cacheControl?.cacheLastNMessages ?? ANTHROPIC_CACHE_DEFAULT_LAST_N_MESSAGES
   const [tokenThresholdDraft, setTokenThresholdDraft] = useState(String(cacheTokenThreshold))
   const [cacheLastNDraft, setCacheLastNDraft] = useState(String(cacheLastNMessages))
   const effectiveCacheTokenThreshold = clampInteger(tokenThresholdDraft, 0, CACHE_TOKEN_THRESHOLD_MAX)
@@ -111,6 +113,11 @@ export default function ProviderApiOptionsDrawer({ providerId, open, onClose }: 
       return []
     }
 
+    const visibility = getProviderApiOptionsVisibility(provider)
+    if (!visibility.showApiFeatureSettings) {
+      return []
+    }
+
     const items: ApiOption[] = [
       {
         key: 'arrayContent',
@@ -119,7 +126,7 @@ export default function ProviderApiOptionsDrawer({ providerId, open, onClose }: 
       }
     ]
 
-    if (isOpenAIOptionsProvider(provider)) {
+    if (visibility.isOpenAIProvider) {
       items.push(...openAIOptions)
     }
 
@@ -152,9 +159,9 @@ export default function ProviderApiOptionsDrawer({ providerId, open, onClose }: 
       }
 
       const next = {
-        tokenThreshold: 0,
+        tokenThreshold: ANTHROPIC_CACHE_DEFAULT_TOKEN_THRESHOLD,
         cacheSystemMessage: true,
-        cacheLastNMessages: 0,
+        cacheLastNMessages: ANTHROPIC_CACHE_DEFAULT_LAST_N_MESSAGES,
         ...provider.settings.cacheControl,
         ...updates
       }

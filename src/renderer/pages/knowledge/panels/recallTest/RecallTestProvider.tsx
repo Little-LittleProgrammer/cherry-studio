@@ -1,6 +1,7 @@
 import { useCache } from '@data/hooks/useCache'
 import { loggerService } from '@logger'
-import { normalizeKnowledgeError } from '@renderer/pages/knowledge/utils'
+import { ipcApi } from '@renderer/ipc'
+import { normalizeKnowledgeError } from '@renderer/pages/knowledge/utils/error'
 import { formatErrorMessageWithPrefix } from '@renderer/utils/error'
 import type { ReactNode } from 'react'
 import { createContext, use, useEffect, useRef, useState } from 'react'
@@ -65,11 +66,10 @@ const RecallTestProvider = ({ baseId, children }: RecallTestProviderProps) => {
       return
     }
 
-    const currentHistoryQueries = historyQueriesByBaseId[baseId] ?? []
-    setHistoryQueriesByBaseId({
-      ...historyQueriesByBaseId,
-      [baseId]: prependHistoryQuery(currentHistoryQueries, trimmedQuery)
-    })
+    setHistoryQueriesByBaseId((prev) => ({
+      ...prev,
+      [baseId]: prependHistoryQuery(prev[baseId] ?? [], trimmedQuery)
+    }))
 
     const searchId = latestSearchIdRef.current + 1
     latestSearchIdRef.current = searchId
@@ -81,7 +81,7 @@ const RecallTestProvider = ({ baseId, children }: RecallTestProviderProps) => {
     const startTime = performance.now()
 
     try {
-      const searchResults = await window.api.knowledgeRuntime.search(searchBaseId, trimmedQuery)
+      const searchResults = await ipcApi.request('knowledge.search', { baseId: searchBaseId, query: trimmedQuery })
       logger.info('Knowledge recall search IPC result', {
         baseId: searchBaseId,
         query: trimmedQuery,
@@ -131,15 +131,15 @@ const RecallTestProvider = ({ baseId, children }: RecallTestProviderProps) => {
         setIsHistoryOpen(false)
       },
       removeHistory: (historyId) =>
-        setHistoryQueriesByBaseId({
-          ...historyQueriesByBaseId,
-          [baseId]: historyQueries.filter((item) => item !== historyId)
-        }),
+        setHistoryQueriesByBaseId((prev) => ({
+          ...prev,
+          [baseId]: (prev[baseId] ?? []).filter((item) => item !== historyId)
+        })),
       clearHistory: () =>
-        setHistoryQueriesByBaseId({
-          ...historyQueriesByBaseId,
+        setHistoryQueriesByBaseId((prev) => ({
+          ...prev,
           [baseId]: []
-        })
+        }))
     },
     meta: { baseId }
   }

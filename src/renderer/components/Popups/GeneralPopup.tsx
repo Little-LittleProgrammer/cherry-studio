@@ -1,7 +1,7 @@
 import { Button, Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@cherrystudio/ui'
 import { cn } from '@cherrystudio/ui/lib/utils'
 import { loggerService } from '@logger'
-import { TopView } from '@renderer/components/TopView'
+import { TopView } from '@renderer/components/TopView/TopView'
 import type { CSSProperties, ReactNode } from 'react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -127,6 +127,7 @@ const PopupContainer: React.FC<Props> = ({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={closable}
+        closeOnOverlayClick={maskClosable}
         className={cn(shouldUseCustomWidth && 'sm:max-w-none', rootClassName, className)}
         style={getContentStyle({ ...rest, styles, width })}
         onEscapeKeyDown={(event) => {

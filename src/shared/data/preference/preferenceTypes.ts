@@ -1,5 +1,5 @@
 import type { BootConfigPreferenceKeys } from '@shared/data/bootConfig/bootConfigTypes'
-import type { ShortcutBinding } from '@shared/shortcuts/tokens'
+import type { ShortcutBinding } from '@shared/utils/shortcut'
 import * as z from 'zod'
 
 import type { PreferenceSchemas } from './preferenceSchemas'
@@ -82,26 +82,48 @@ export type SendMessageShortcut = 'Enter' | 'Shift+Enter' | 'Ctrl+Enter' | 'Comm
 
 export type AssistantTabSortType = 'tags' | 'list'
 
-export type SidebarIcon =
-  | 'assistants'
-  | 'agents'
-  | 'store'
-  | 'paintings'
-  | 'translate'
-  | 'mini_app'
-  | 'knowledge'
-  | 'files'
-  | 'code_tools'
-  | 'notes'
-  | 'openclaw'
+export type TopicDisplayMode = 'time' | 'assistant'
+
+export type AgentSessionDisplayMode = 'time' | 'agent' | 'workdir'
+
+export const SIDEBAR_FAVORITES = [
+  'assistants',
+  'agents',
+  'paintings',
+  'translate',
+  'mini_app',
+  'knowledge',
+  'files',
+  'code_tools',
+  'notes',
+  'openclaw'
+] as const
+
+export type SidebarFavorite = (typeof SIDEBAR_FAVORITES)[number]
+
+/**
+ * Group-ready sidebar storage contract.
+ *
+ * Leaf items are stored as tagged objects, not bare ids. Keep the `type` values,
+ * id semantics, and one ordered heterogeneous top-level array stable: a future
+ * `group` variant can then be added as another top-level item without migrating
+ * existing flat `SidebarFavoriteItem[]` values.
+ */
+export type SidebarFavoriteItem =
+  | {
+      type: 'app'
+      id: SidebarFavorite
+    }
+  | {
+      type: 'mini_app'
+      id: string
+    }
 
 export type AssistantIconType = 'model' | 'emoji' | 'none'
 
 export type ProxyMode = 'system' | 'custom' | 'none'
 
 export type MultiModelFoldDisplayMode = 'expanded' | 'compact'
-
-export type MathEngine = 'KaTeX' | 'MathJax' | 'none'
 
 export enum UpgradeChannel {
   LATEST = 'latest', // 最新稳定版本
@@ -110,6 +132,9 @@ export enum UpgradeChannel {
 }
 
 export type ChatMessageStyle = 'plain' | 'bubble'
+
+/** Chat resource-list layout: 'classic' = entity rail + right resource panel, 'modern' = single sidebar. */
+export type ChatLayoutMode = 'classic' | 'modern'
 
 export type ChatMessageNavigationMode = 'none' | 'buttons' | 'anchor'
 
@@ -177,7 +202,8 @@ export const WEB_SEARCH_PROVIDER_IDS = [
   'bocha',
   'querit',
   'fetch',
-  'jina'
+  'jina',
+  'firecrawl'
 ] as const
 
 export type WebSearchProviderId = (typeof WEB_SEARCH_PROVIDER_IDS)[number]
@@ -235,14 +261,14 @@ export interface WebSearchProvider {
 // CodeCLI Types
 // ============================================================================
 
-import { codeCLI } from '@shared/config/constant'
+import { CodeCli } from '@shared/types/codeCli'
 
-export const CODE_CLI_IDS = Object.values(codeCLI) as unknown as readonly [
+export const CODE_CLI_IDS = Object.values(CodeCli) as unknown as readonly [
   'qwen-code',
   'claude-code',
   'gemini-cli',
   'openai-codex',
-  'iflow-cli',
+  'qoder-cli',
   'github-copilot-cli',
   'kimi-cli',
   'opencode'
@@ -254,7 +280,7 @@ export type CodeCliOverride = {
   enabled?: boolean
   modelId?: string | null
   envVars?: string
-  /** Terminal app name — should match `terminalApps` enum values */
+  /** Terminal app name — should match `TerminalApp` enum values */
   terminal?: string
   currentDirectory?: string
   directories?: string[]
@@ -320,3 +346,18 @@ export type FileProcessorOverrides = Partial<Record<FileProcessorId, FileProcess
 export type MiniAppRegion = 'CN' | 'Global'
 
 export type MiniAppRegionFilter = 'auto' | MiniAppRegion
+
+export type ManagedBinary = {
+  name: string
+  tool: string
+  version?: string
+}
+
+export interface ToolInstallState {
+  tool: string
+  version: string
+}
+
+export interface BinaryState {
+  tools: Record<string, ToolInstallState>
+}

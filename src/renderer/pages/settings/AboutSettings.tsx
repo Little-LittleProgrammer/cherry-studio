@@ -1,23 +1,28 @@
 import { Badge, Button, CircularProgress, Divider, SegmentedControl, Switch, Tooltip } from '@cherrystudio/ui'
 import { usePreference } from '@data/hooks/usePreference'
-import LogoAvatar from '@renderer/components/Icons/LogoAvatar'
+import AppLogo from '@renderer/assets/images/logo.png'
+import LogoAvatar from '@renderer/components/icons/LogoAvatar'
 import IndicatorLight from '@renderer/components/IndicatorLight'
 import UpdateDialogPopup from '@renderer/components/Popups/UpdateDialogPopup'
-import { APP_NAME, AppLogo } from '@renderer/config/env'
-import { useTheme } from '@renderer/context/ThemeProvider'
+import {
+  SettingGroup,
+  SettingRow,
+  SettingRowTitle,
+  SettingsContentColumn,
+  SettingTitle
+} from '@renderer/components/SettingsPrimitives'
 import { useAppUpdateState } from '@renderer/hooks/useAppUpdate'
 import { useMiniAppPopup } from '@renderer/hooks/useMiniAppPopup'
-import i18n from '@renderer/i18n'
-import { runAsyncFunction } from '@renderer/utils'
+import { useTheme } from '@renderer/hooks/useTheme'
+import i18n from '@renderer/i18n/resolver'
+import { ipcApi } from '@renderer/ipc'
 import { ThemeMode, UpgradeChannel } from '@shared/data/preference/preferenceTypes'
-import { debounce } from 'lodash'
+import { debounce } from 'es-toolkit/compat'
 import { BadgeQuestionMark, Briefcase, Bug, Building2, Github, Globe, Mail, Rss } from 'lucide-react'
 import type { FC, ReactNode } from 'react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import Markdown from 'react-markdown'
-
-import { SettingGroup, SettingRow, SettingRowTitle, SettingsContentColumn, SettingTitle } from '.'
+import { Streamdown } from 'streamdown'
 
 const AboutSettings: FC = () => {
   const [autoCheckUpdate, setAutoCheckUpdate] = usePreference('app.dist.auto_update.enabled')
@@ -46,7 +51,7 @@ const AboutSettings: FC = () => {
       updateAppUpdateState({ checking: true, manualCheck: true })
 
       try {
-        await window.api.checkForUpdate()
+        await ipcApi.request('app.updater.check_for_update')
       } catch {
         updateAppUpdateState({ manualCheck: false })
         window.toast.error(t('settings.about.updateError'))
@@ -64,7 +69,7 @@ const AboutSettings: FC = () => {
 
   const mailto = async () => {
     const email = 'support@cherry-ai.com'
-    const subject = `${APP_NAME} Feedback`
+    const subject = 'Cherry Studio Feedback'
     const version = (await window.api.getAppInfo()).version
     const platform = window.electron.process.platform
     const url = `mailto:${email}?subject=${subject}&body=%0A%0AVersion: ${version} | Platform: ${platform}`
@@ -149,13 +154,12 @@ const AboutSettings: FC = () => {
   }
 
   useEffect(() => {
-    void runAsyncFunction(async () => {
+    void (async () => {
       const appInfo = await window.api.getAppInfo()
       setVersion(appInfo.version)
       setIsPortable(appInfo.isPortable)
-    })
-    void setAutoCheckUpdate(autoCheckUpdate)
-  }, [autoCheckUpdate, setAutoCheckUpdate])
+    })()
+  }, [])
 
   const onOpenDocs = () => {
     const isChinese = i18n.language.startsWith('zh')
@@ -172,7 +176,7 @@ const AboutSettings: FC = () => {
           <button
             type="button"
             onClick={() => onOpenWebsite('https://github.com/CherryHQ/cherry-studio')}
-            className="inline-flex items-center justify-center rounded-md p-1 text-(--color-foreground) transition-colors hover:bg-(--color-muted)">
+            className="inline-flex items-center justify-center rounded-md p-1 text-foreground transition-colors hover:bg-muted">
             <Github className="size-5" />
           </button>
         </SettingTitle>
@@ -200,9 +204,9 @@ const AboutSettings: FC = () => {
               <LogoAvatar logo={AppLogo} size={72} className="rounded-full" />
             </button>
 
-            <div className="flex min-h-[72px] flex-col items-start justify-center">
-              <div className="mb-1 font-bold text-(--color-foreground) text-lg">{APP_NAME}</div>
-              <div className="text-(--color-foreground-secondary) text-sm">{t('settings.about.description')}</div>
+            <div className="flex min-h-18 flex-col items-start justify-center">
+              <div className="mb-1 font-bold text-foreground text-lg">Cherry Studio</div>
+              <div className="text-foreground-secondary text-sm">{t('settings.about.description')}</div>
               <button
                 type="button"
                 onClick={() => onOpenWebsite('https://github.com/CherryHQ/cherry-studio/releases')}
@@ -222,7 +226,7 @@ const AboutSettings: FC = () => {
                 loading={appUpdateState.checking}
                 onClick={onCheckUpdate}
                 disabled={appUpdateState.downloading}
-                className="!w-fit !min-w-0 shrink-0">
+                className="w-fit! min-w-0! shrink-0">
                 {appUpdateState.downloading
                   ? t('settings.about.downloading')
                   : appUpdateState.available
@@ -282,12 +286,12 @@ const AboutSettings: FC = () => {
               <IndicatorLight color="green" />
             </SettingRowTitle>
           </SettingRow>
-          <div className="markdown my-2 rounded-md bg-muted px-0 py-3 text-(--color-foreground-secondary) text-sm [&_p]:m-0">
-            <Markdown>
+          <div className="markdown my-2 rounded-md bg-muted px-0 py-3 text-foreground-secondary text-sm [&_p]:m-0">
+            <Streamdown mode="static">
               {typeof appUpdateState.info.releaseNotes === 'string'
                 ? appUpdateState.info.releaseNotes.replace(/\n/g, '\n\n')
                 : appUpdateState.info.releaseNotes?.map((note) => note.note).join('\n')}
-            </Markdown>
+            </Streamdown>
           </div>
         </SettingGroup>
       )}

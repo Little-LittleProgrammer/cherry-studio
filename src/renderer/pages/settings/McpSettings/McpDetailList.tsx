@@ -30,7 +30,7 @@ export const McpDetailItem = ({
     <dt
       className={cn(
         'min-w-0 bg-muted/35 px-3 py-2 font-medium text-foreground/80 text-sm leading-5',
-        'whitespace-normal break-words [overflow-wrap:anywhere]',
+        'wrap-break-word wrap-anywhere whitespace-normal',
         labelClassName
       )}>
       {label}
@@ -38,16 +38,10 @@ export const McpDetailItem = ({
     <dd
       className={cn(
         'min-w-0 px-3 py-2 text-foreground text-sm leading-5',
-        'whitespace-normal break-words [overflow-wrap:anywhere]',
+        'wrap-break-word wrap-anywhere whitespace-normal',
         contentClassName
       )}>
       {children}
     </dd>
   </div>
-)
-
-export const RequiredMark = ({ className, ...props }: React.ComponentPropsWithoutRef<'span'>) => (
-  <span className={cn('text-destructive', className)} {...props}>
-    *
-  </span>
 )

@@ -28,7 +28,7 @@ import { loggerService } from '@logger'
 import type { Event } from '@main/core/lifecycle'
 import { Emitter } from '@main/core/lifecycle'
 import type { DanglingState, FileEntry, FileEntryId } from '@shared/data/types/file'
-import type { FilePath } from '@shared/file/types'
+import type { FilePath } from '@shared/types/file'
 
 const logger = loggerService.withContext('file/danglingCache')
 
@@ -108,7 +108,7 @@ export interface DanglingCache {
 
 /** Minimal external-entries source the cache needs at startup. */
 interface FileEntrySource {
-  findMany(query: { origin: 'external' }): Promise<FileEntry[]>
+  findMany(query: { origin: 'external' }): FileEntry[]
 }
 
 export interface DanglingCacheOptions {
@@ -233,11 +233,13 @@ class DanglingCacheImpl implements DanglingCache {
   }
 
   async initFromDb(): Promise<void> {
-    if (!this.fileEntryService) {
+    let service = this.fileEntryService
+    if (!service) {
       const { fileEntryService } = await import('@data/services/FileEntryService')
-      this.fileEntryService = fileEntryService
+      service = fileEntryService
+      this.fileEntryService = service
     }
-    const rows = await this.fileEntryService.findMany({ origin: 'external' })
+    const rows = service.findMany({ origin: 'external' })
     for (const row of rows) {
       if (row.origin !== 'external') continue
       this.addEntry(row.id, row.externalPath)

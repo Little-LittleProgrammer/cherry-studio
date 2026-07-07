@@ -1,6 +1,6 @@
-import { getProviderLabel } from '@renderer/i18n/label'
-import type { Provider } from '@renderer/types'
-import { isSystemProvider } from '@renderer/types'
+import { getProviderLabelKey } from '@renderer/i18n/label'
+import i18n from '@renderer/i18n/resolver'
+import { isSystemProvider, type Provider } from '@renderer/types/provider'
 
 /**
  * 判断一个字符串是否包含由另一个字符串表示的 keywords
@@ -54,6 +54,6 @@ export function matchKeywordsInProvider(keywords: string | string[], provider: P
  */
 function getProviderSearchString(provider: Provider) {
   return isSystemProvider(provider)
-    ? `${getProviderLabel(provider.id)} ${provider.id} ${provider.name}`
+    ? `${i18n.t(getProviderLabelKey(provider.id))} ${provider.id} ${provider.name}`
     : `${provider.id} ${provider.name}`
 }

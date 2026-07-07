@@ -1,7 +1,7 @@
 import { loggerService } from '@logger'
 import type { Disposable } from '@main/core/lifecycle'
-import { toDataApiError } from '@shared/data/api/apiErrors'
-import type { DataRequest, DataResponse } from '@shared/data/api/apiTypes'
+import { toDataApiError } from '@shared/data/api/errors'
+import type { DataRequest, DataResponse } from '@shared/data/api/types'
 import { IpcChannel } from '@shared/IpcChannel'
 import { ipcMain } from 'electron'
 
@@ -43,16 +43,9 @@ export class IpcAdapter implements Disposable {
       return
     }
 
-    logger.debug('Setting up IPC handlers...')
-
     // Main data request handler
     ipcMain.handle(IpcChannel.DataApi_Request, async (_event, request: DataRequest): Promise<DataResponse> => {
       try {
-        logger.debug(`Handling data request: ${request.method} ${request.path}`, {
-          id: request.id,
-          params: request.params
-        })
-
         const response = await this.apiServer.handleRequest(request)
 
         return response
@@ -88,7 +81,6 @@ export class IpcAdapter implements Disposable {
     })
 
     this.initialized = true
-    logger.debug('IPC handlers setup complete')
   }
 
   /**

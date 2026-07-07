@@ -1,7 +1,7 @@
 import { useKnowledgeBases } from '@renderer/hooks/useKnowledgeBase'
 import { useAddKnowledgeItems } from '@renderer/hooks/useKnowledgeItems'
-import type { FileMetadata } from '@renderer/types'
-import type { Message } from '@renderer/types/newMessage'
+import type { FileMetadata } from '@renderer/types/file'
+import type { MessageExportView } from '@renderer/types/messageExport'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -28,7 +28,7 @@ vi.mock('@renderer/hooks/useKnowledgeItems', () => ({
   useAddKnowledgeItems: vi.fn()
 }))
 
-vi.mock('@renderer/components/TopView', () => ({
+vi.mock('@renderer/components/TopView/TopView', () => ({
   TopView: mocks.TopView
 }))
 
@@ -44,7 +44,7 @@ vi.mock('@renderer/utils/knowledge', () => ({
     FILE: 'files',
     IMAGES: 'images'
   },
-  analyzeMessageContent: (message: Message & { testFiles?: FileMetadata[] }) => ({
+  analyzeMessageContent: (message: MessageExportView & { testFiles?: FileMetadata[] }) => ({
     text: 0,
     code: 0,
     thinking: 0,
@@ -55,8 +55,11 @@ vi.mock('@renderer/utils/knowledge', () => ({
     translations: 0,
     errors: 0
   }),
+  processMessageContent: mocks.processMessageContent
+}))
+
+vi.mock('@renderer/services/knowledgeContent', () => ({
   analyzeTopicContent: vi.fn(),
-  processMessageContent: mocks.processMessageContent,
   processTopicContent: vi.fn()
 }))
 
@@ -74,21 +77,54 @@ vi.mock('lucide-react', () => ({
   Check: () => <span data-testid="check-icon" />
 }))
 
-vi.mock('@cherrystudio/ui', async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>()
-  return {
-    ...actual,
-    Button: ({ children, loading, ...props }: React.ComponentProps<'button'> & { loading?: boolean }) => (
-      <button type="button" {...props}>
-        {loading ? 'loading' : children}
-      </button>
-    )
-  }
-})
+vi.mock('@renderer/components/tags/CustomTag', () => ({
+  default: ({ children }: { children: React.ReactNode }) => <span>{children}</span>
+}))
 
-async function renderPopup(source: Message) {
-  const { default: SaveToKnowledgePopup } = await import('../SaveToKnowledgePopup')
+vi.mock('@cherrystudio/ui', () => ({
+  Button: ({ children, loading, ...props }: React.ComponentProps<'button'> & { loading?: boolean }) => (
+    <button type="button" {...props}>
+      {loading ? 'loading' : children}
+    </button>
+  ),
+  ColFlex: ({ children, ...props }: React.ComponentProps<'div'>) => <div {...props}>{children}</div>,
+  Combobox: ({
+    onChange,
+    options = [],
+    value
+  }: {
+    onChange: (value: string) => void
+    options?: { label: string; value: string; disabled?: boolean }[]
+    value?: string
+  }) => (
+    <select aria-label="knowledge-base" onChange={(event) => onChange(event.target.value)} value={value ?? ''}>
+      {options.map((option) => (
+        <option key={option.value} disabled={option.disabled} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+    </select>
+  ),
+  Dialog: ({ children, open }: { children: React.ReactNode; open: boolean }) => (open ? <div>{children}</div> : null),
+  DialogContent: ({
+    children,
+    closeOnOverlayClick,
+    ...props
+  }: React.ComponentProps<'div'> & { closeOnOverlayClick?: boolean }) => {
+    void closeOnOverlayClick
+    return <div {...props}>{children}</div>
+  },
+  DialogFooter: ({ children, ...props }: React.ComponentProps<'div'>) => <div {...props}>{children}</div>,
+  DialogHeader: ({ children, ...props }: React.ComponentProps<'div'>) => <div {...props}>{children}</div>,
+  DialogTitle: ({ children, ...props }: React.ComponentProps<'h2'>) => <h2 {...props}>{children}</h2>,
+  Flex: ({ children, ...props }: React.ComponentProps<'div'>) => <div {...props}>{children}</div>,
+  HelpTooltip: () => null,
+  Label: ({ children, ...props }: React.ComponentProps<'label'>) => <label {...props}>{children}</label>
+}))
 
+import SaveToKnowledgePopup from '../SaveToKnowledgePopup'
+
+function renderPopup(source: MessageExportView) {
   const promise = SaveToKnowledgePopup.show({ source: { type: 'message', data: source } })
   const rendered = mocks.TopView.show.mock.calls[0][0] as React.ReactNode
 
@@ -110,7 +146,7 @@ function createFile(path: string, id: string): FileMetadata {
   }
 }
 
-function createMessageWithFiles(files: FileMetadata[]): Message {
+function createMessageWithFiles(files: FileMetadata[]): MessageExportView {
   return {
     id: 'message-1',
     role: 'user',
@@ -118,9 +154,9 @@ function createMessageWithFiles(files: FileMetadata[]): Message {
     topicId: 'topic-1',
     createdAt: '2026-05-27T00:00:00.000Z',
     status: 'success',
-    blocks: files.map((file) => `${file.id}-block`),
+    parts: [],
     testFiles: files
-  } as Message
+  } as MessageExportView & { testFiles: FileMetadata[] }
 }
 
 describe('SaveToKnowledgePopup', () => {
@@ -130,7 +166,7 @@ describe('SaveToKnowledgePopup', () => {
       configurable: true,
       value: vi.fn()
     })
-    mocks.processMessageContent.mockImplementation((message: Message & { testFiles?: FileMetadata[] }) => ({
+    mocks.processMessageContent.mockImplementation((message: MessageExportView & { testFiles?: FileMetadata[] }) => ({
       text: '',
       files: message.testFiles ?? []
     }))
@@ -144,12 +180,7 @@ describe('SaveToKnowledgePopup', () => {
     Object.assign(window, {
       api: {
         file: {
-          ensureExternalEntry: vi.fn(async ({ externalPath }: { externalPath: string }) => ({
-            id:
-              externalPath === '/tmp/ok.pdf'
-                ? '019606a0-0000-7000-8000-000000000001'
-                : '019606a0-0000-7000-8000-000000000002'
-          }))
+          ensureExternalEntry: vi.fn()
         }
       },
       toast: mocks.toast
@@ -161,7 +192,7 @@ describe('SaveToKnowledgePopup', () => {
   })
 
   it('saves resolvable files and warns about failed files', async () => {
-    const { promise } = await renderPopup(
+    const { promise } = renderPopup(
       createMessageWithFiles([createFile('/tmp/ok.pdf', 'ok'), createFile('bad.pdf', 'bad')])
     )
 
@@ -174,7 +205,7 @@ describe('SaveToKnowledgePopup', () => {
           type: 'file',
           data: {
             source: '/tmp/ok.pdf',
-            fileEntryId: '019606a0-0000-7000-8000-000000000001'
+            path: '/tmp/ok.pdf'
           }
         }
       ])

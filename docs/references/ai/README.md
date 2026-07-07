@@ -22,6 +22,7 @@ translate, summarisation) and the renderer-side transport that connects to it.
 | [Agent Loop](./agent-loop.md) | Main-process `Agent.stream()`: single-pass stream, hook composition, observer pattern, error/abort semantics |
 | [Params Pipeline](./params-pipeline.md) | `buildAgentParams` + `RequestFeature` model: how capabilities, plugins, tools, and provider-specific quirks are composed |
 | [Tool Registry](./tool-registry.md) | Built-in tools (knowledge / web search), MCP tools, meta-tools (`tool_search` / `tool_inspect` / `tool_invoke` / `tool_exec`), deferred exposition |
+| [Chat Attachments](./chat-attachments.md) | How attached files reach the model: native file parts when supported, capped extracted text otherwise, `read_file` for overflow paging |
 | [Provider Resolution](./provider-resolution.md) | `Provider.endpointConfigs` schema, endpoint resolution chain, variant suffixes, custom provider extensions (aihubmix, newapi) |
 | [Observability (trace / telemetry)](./observability.md) | `AiSdkSpanAdapter`, root span propagation, OTel attribute shape, local span projection, sinks |
 
@@ -30,7 +31,7 @@ translate, summarisation) and the renderer-side transport that connects to it.
 | Document | What it covers |
 |---|---|
 | [IPC Transport](./ipc-transport.md) | `useChat` + `IpcChatTransport`: `sendMessages` / `reconnectToStream`, dispatch coordinator, topic-status mirror |
-| [Execution Overlay](./execution-overlay.md) | `TopicStreamSubscription` + `useExecutionOverlay`: ref-counted attach, per-execution demux, one-shot `readUIMessageStream` per turn (the renderer half of the same merge function Main uses) |
+| [Execution Overlay](./execution-overlay.md) | `TopicStreamSubscription` + `useExecutionOverlay`: ref-counted attach, execution + anchor demux, one-shot `readUIMessageStream` per turn (the renderer half of the same merge function Main uses) |
 | [Tool Approval](./tool-approval.md) | Approval registry, Main-as-writer model, persistent decisions, `useToolApproval` hook |
 
 ## Where the code lives
@@ -69,7 +70,7 @@ src/main/ai/
 ├── skills/                       ← SkillService, SkillInstaller
 ├── tools/                        ← unified tool registry
 │   └── adapters/
-│       ├── aiSdk/                ← registry.ts, repair.ts; builtin/ (web__search/web__fetch/kb__*),
+│       ├── aiSdk/                ← registry.ts, repair.ts; builtin/ (web_search/web_fetch/kb_*),
 │       │                            mcp/ (server → ToolEntry sync), meta/ (tool_search/inspect/invoke;
 │       │                            tool_exec defined but not injected), exposition/ (shouldDefer + applyDefer)
 │       └── claudeCode/           ← agentTools.ts (registry → Claude Code runtime)
@@ -94,9 +95,9 @@ src/main/ai/
    the user message, builds listeners, and returns a `PreparedDispatch`.
 4. `AiStreamManager.send(input)` **starts** a turn (no active stream): creates
    an `ActiveStream`, launches one `StreamExecution` per model. (A chat
-   resubmit on a live topic is restarted upstream — `dispatch` calls
-   `abortAndAwait` first; only an agent-session follow-up takes the
-   **inject** path, which just upserts listeners.)
+   resubmit on a live topic is persisted + queued as a steer and takes the
+   **inject** path — the running turn yields and `onExecutionDone` chains a
+   continuation; an agent-session follow-up also injects, upserting listeners.)
 5. Each execution's `runExecutionLoop` calls `AiService.streamText(request,
    signal)`, which builds params (`buildAgentParams`) and constructs an `Agent`
    composing hooks from `RequestFeature[]` (anthropic cache, gateway usage

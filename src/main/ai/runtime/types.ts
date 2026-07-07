@@ -1,3 +1,6 @@
+import type { AgentSessionCompactionAnchorData, AgentSessionCompactionTrigger } from '@shared/ai/agentSessionCompaction'
+import type { AgentSessionContextUsage } from '@shared/ai/agentSessionContextUsage'
+import type { AgentSessionSlashCommand } from '@shared/ai/agentSessionSlashCommands'
 import type { Tool } from '@shared/ai/tool'
 import type { AgentEntity, AgentPermissionMode } from '@shared/data/api/schemas/agents'
 import type { AgentSessionEntity, AgentSessionMessageEntity } from '@shared/data/api/schemas/agentSessions'
@@ -30,36 +33,62 @@ export interface AgentRuntimeConnectInput {
 
 export interface AgentRuntimeUserInput {
   message: AgentSessionMessageEntity
+  /** True when this message arrived mid-turn (a steer) — the driver wraps it in a system-reminder
+   *  so the model treats it as a redirect rather than a fresh prompt (invariant 7). */
+  systemReminder?: boolean
 }
 
 export type AgentRuntimePolicyUpdate =
   | { type: 'permission-mode'; permissionMode: AgentPermissionMode | undefined }
-  | { type: 'tool-policy'; agent: AgentEntity }
+  | { type: 'tool-policy'; agent: Pick<AgentEntity, 'mcps' | 'disabledTools' | 'configuration'> }
 
 export type AgentRuntimeEvent =
   | { type: 'chunk'; chunk: UIMessageChunk }
   | { type: 'resume-token'; token: string }
   | { type: 'turn-complete' }
+  /** Steers stashed via `redirect()` that the turn ended before injecting — the host queues them
+   *  as the next turn (the `steer_undelivered` fallback). */
+  | { type: 'steer-undelivered'; inputs: AgentRuntimeUserInput[] }
+  /** A steer was injected mid-turn (PreToolUse hook) and the model is about to emit its post-steer
+   *  assistant message. Marks where the host should roll the assistant message: finalise the
+   *  pre-steer parts as one row (A1a) and stream the continuation into a fresh row (A2), so the
+   *  steer user message sorts between them instead of dangling after the whole turn. */
+  | { type: 'steer-boundary'; inputs: AgentRuntimeUserInput[] }
+  | { type: 'compaction-start'; trigger?: AgentSessionCompactionTrigger }
+  | { type: 'compaction-complete'; anchor?: AgentSessionCompactionAnchorData }
+  | { type: 'compaction-error'; error: string }
+  | { type: 'context-usage'; usage: AgentSessionContextUsage }
+  /** The SDK pushed a fresh slash-command catalog mid-session (`system / commands_changed`) — e.g.
+   *  skills discovered as the agent works in a subdirectory. `supportedCommands()` is captured at
+   *  init and never reflects this, so the host REPLACES its cached list from `commands`. */
+  | { type: 'supported-commands'; commands: AgentSessionSlashCommand[] }
   | { type: 'error'; error: unknown }
 
 export interface AgentRuntimeConnection {
   readonly events: AsyncIterable<AgentRuntimeEvent>
   send(input: AgentRuntimeUserInput): void | Promise<void>
+  /**
+   * Inject a mid-turn user message (steer) into the running turn without aborting it. Returns true
+   * when the message was stashed for injection (a turn is live) — the host then folds it into the
+   * current turn instead of opening a new one; if the turn ends before it is injected the connection
+   * emits `steer-undelivered`. Returns false when there is no live turn to steer, so the host queues
+   * the message as the next turn. Omitted ⇒ no native steer ⇒ host always queues.
+   */
+  redirect?(input: AgentRuntimeUserInput): boolean
   applyPolicyUpdate?(update: AgentRuntimePolicyUpdate): Promise<boolean> | boolean
-  interrupt?(): Promise<void>
   /**
-   * Runtime-specific predicate: is it safe to interrupt the current turn right
-   * now? The host falls back to "no tool is mid-execution" when a connection
-   * omits it, so existing runtimes keep their behaviour; lets a runtime that
-   * tracks its own tool state self-manage interruptibility.
+   * Read the live context-window usage for this connection's session. Returns null when the
+   * underlying runtime can't report it (no query yet, or a driver that doesn't support it).
+   * Optional ⇒ the host treats the runtime as unable to report usage.
    */
-  canInterruptNow?(): boolean
+  getContextUsage?(): Promise<AgentSessionContextUsage | null>
   /**
-   * Runtime-specific policy: should the host tear this connection down once the
-   * current turn ends? Lets a driver (e.g. Claude trace mode) own the decision
-   * instead of the host reaching into driver internals. Omitted ⇒ keep open.
+   * Read this session's available slash command catalog (`query.supportedCommands()`), including
+   * any custom project/user commands the SDK discovered. Returns null when the runtime can't report
+   * it (no query yet, or a driver that doesn't support it). Optional ⇒ the host falls back to the
+   * static builtin list.
    */
-  shouldCloseAfterTurn?(): boolean
+  getSupportedCommands?(): Promise<AgentSessionSlashCommand[] | null>
   close(): void | Promise<void>
 }
 

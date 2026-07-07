@@ -31,6 +31,7 @@ src/main/features/apiGateway/        ← the HTTP server (Elysia + @elysia/node)
 ├── ApiGatewayService.ts             ← lifecycle owner (start/stop, IPC, auto-start, running-state)
 ├── proxyStream.ts                   ← `processMessage()` — the core request → stream → response engine
 ├── reasoningCache.ts                ← google / openrouter reasoning-signature caches
+├── openrouter.ts                    ← OpenRouter `reasoning_details` type contract (used by reasoningCache)
 ├── middleware/
 │   └── auth.ts                      ← `authorizeApiRequest` (x-api-key | Bearer, timing-safe)
 ├── routes/
@@ -49,7 +50,7 @@ src/main/features/apiGateway/        ← the HTTP server (Elysia + @elysia/node)
     ├── formatters/                  ← output event → SSE wire string
     └── factory/                     ← `MessageConverterFactory`, `StreamAdapterFactory`
 
-src/preload/index.ts                      ← `window.api.apiGateway.{start,stop,restart}`
+src/preload/preload.ts                    ← `window.api.apiGateway.{start,stop,restart}`
 src/renderer/hooks/useApiGateway.ts       ← renderer state (config + running + loading) and actions
 src/renderer/pages/settings/ToolSettings/ApiGatewaySettings/   ← settings UI
 ```
@@ -197,11 +198,13 @@ running state.
 `ensureValidApiKey()` generates a `cs-sk-<uuid>` key into
 `feature.api_gateway.api_key` the first time it is missing.
 
-All activation/deactivation flows through one `reconcile()` loop — the **sole**
-caller of `activate`/`deactivate`, driven by `onReady`, the
-`feature.api_gateway.enabled` subscription, and the IPC `start`/`stop`/`restart`.
-It converges the running state to the latest desired value (looping against the
-actual activated state), so an opposing toggle that lands mid-transition can't
+All activation/deactivation flows through a self-held
+[`createLatestReconciler`](../../../src/main/core/concurrency/README.md) — the
+**sole** caller of `activate`/`deactivate`, driven by `onReady`, the
+`feature.api_gateway.enabled` subscription, and the IPC `start`/`stop`/`restart`
+(which set `desiredEnabled`, then `request()` + `await flush()`). It converges the
+running state to the latest desired value (`getSnapshot` re-reads the actual
+activated state every pass), so an opposing toggle that lands mid-transition can't
 leave the gateway diverged from intent; a still-current failure isn't retried (no
 spin). `restart()` is `stop()` then `start()`.
 

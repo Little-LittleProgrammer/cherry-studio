@@ -102,6 +102,32 @@ describe('MigrationEngine', () => {
     ])
   })
 
+  it('aggregates prepare and execute warnings into the migrator result on success', async () => {
+    const events: string[] = []
+    const migrator = createTestMigrator('knowledge', 1, events)
+    migrator.prepare.mockResolvedValueOnce({ success: true, itemCount: 0, warnings: ['prepare warn'] } as any)
+    migrator.execute.mockResolvedValueOnce({ success: true, processedCount: 0, warnings: ['execute warn'] } as any)
+
+    engine.registerMigrators([migrator as any])
+
+    const result = await engine.run({}, '/tmp/dexie_export')
+
+    expect(result.success).toBe(true)
+    expect(result.migratorResults).toHaveLength(1)
+    expect(result.migratorResults[0].warnings).toEqual(['prepare warn', 'execute warn'])
+  })
+
+  it('omits the warnings field when a migrator reports none', async () => {
+    const events: string[] = []
+    const migrator = createTestMigrator('clean', 1, events)
+
+    engine.registerMigrators([migrator as any])
+
+    const result = await engine.run({}, '/tmp/dexie_export')
+
+    expect(result.migratorResults[0].warnings).toBeUndefined()
+  })
+
   it('logs failed runs with an Error object so stack/cause are preserved', async () => {
     const errorSpy = vi.spyOn(mockMainLoggerService, 'error').mockImplementation(() => {})
     const events: string[] = []
@@ -121,15 +147,61 @@ describe('MigrationEngine', () => {
     errorSpy.mockRestore()
   })
 
+  it('aborts the whole migration when validate() reports targetCount below sourceCount minus skippedCount', async () => {
+    // The engine reconciliation that KnowledgeVectorMigrator's per-base isolation (C1) depends on:
+    // an uncredited shortfall (a base whose rows counted into sourceCount but produced no target
+    // units and were NOT added to skippedCount) trips `targetCount < sourceCount - skippedCount`
+    // and fails the whole migration.
+    const errorSpy = vi.spyOn(mockMainLoggerService, 'error').mockImplementation(() => {})
+    const events: string[] = []
+    const migrator = createTestMigrator('knowledge_vector', 1, events)
+    migrator.validate.mockResolvedValueOnce({
+      success: true,
+      errors: [],
+      stats: { sourceCount: 2, targetCount: 1, skippedCount: 0 }
+    } as any)
+
+    engine.registerMigrators([migrator as any])
+
+    const result = await engine.run({}, '/tmp/dexie_export')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('count mismatch')
+    expect((engine as any).markFailed).toHaveBeenCalled()
+
+    errorSpy.mockRestore()
+  })
+
+  it('accepts the run when skippedCount credits the shortfall (per-base failure isolation)', async () => {
+    // The flip side: crediting the failed base's expected units to skippedCount (what C1 does in
+    // the per-base catch) drops expectedCount in lockstep with the missing targetCount, so the same
+    // 2-source / 1-target outcome reconciles and the migration succeeds instead of aborting.
+    const events: string[] = []
+    const migrator = createTestMigrator('knowledge_vector', 1, events)
+    migrator.validate.mockResolvedValueOnce({
+      success: true,
+      errors: [],
+      stats: { sourceCount: 2, targetCount: 1, skippedCount: 1 }
+    } as any)
+
+    engine.registerMigrators([migrator as any])
+
+    const result = await engine.run({}, '/tmp/dexie_export')
+
+    expect(result.success).toBe(true)
+    expect((engine as any).markFailed).not.toHaveBeenCalled()
+  })
+
   it('clears new architecture tables inside one transaction', async () => {
-    const deleteFn = vi.fn().mockResolvedValue(undefined)
-    const transactionFn = vi.fn(async (fn: (tx: unknown) => Promise<void>) => {
-      await fn({ delete: deleteFn })
+    const runFn = vi.fn()
+    const deleteFn = vi.fn(() => ({ run: runFn }))
+    const transactionFn = vi.fn((fn: (tx: unknown) => void) => {
+      fn({ delete: deleteFn })
     })
     const db = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
-          get: vi.fn().mockResolvedValue({ count: 0 })
+          get: vi.fn(() => ({ count: 0 }))
         }))
       })),
       transaction: transactionFn
