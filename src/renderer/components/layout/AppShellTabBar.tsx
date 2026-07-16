@@ -19,6 +19,7 @@ import { useTabDrag } from './useTabDrag'
 type AppShellTabBarProps = {
   tabs: Tab[]
   activeTabId: string
+  isFullscreen?: boolean
   setActiveTab: (id: string) => void
   closeTab: (id: string) => void
   addTab?: (tab: Tab) => void
@@ -96,6 +97,7 @@ const PinnedTabButton = ({ tab, isActive, onSelect, drag, tabRef, tone, ref, ...
 
 // Threshold below which the right-side X is hidden and icon-overlay X is used instead
 const NARROW_TAB_THRESHOLD = 64
+const MACOS_TAB_STRIP_TRAFFIC_LIGHT_RESERVE = 'max(0px, calc(env(titlebar-area-x, 0px) - var(--sidebar-width, 0px)))'
 
 function getResourceListRevealSourceFromUrl(url: string): ResourceListRevealSource | null {
   if (url === '/app/chat' || url.startsWith('/app/chat?') || url.startsWith('/app/chat/')) return 'assistants'
@@ -187,13 +189,13 @@ const NormalTabButton = ({
       }}
       className={cn(
         'nodrag group relative flex h-[30px] min-w-[40px] max-w-[160px] flex-1 items-center gap-1.5 rounded-[10px] transition-all duration-150 [-webkit-app-region:no-drag]',
-        showRightClose ? 'pr-1 pl-2' : 'px-2',
+        showRightClose ? 'pr-1.5 pl-2' : 'px-2',
         drag.isDragging ? 'cursor-grabbing' : 'cursor-default',
         isActive ? tone.activeClass : tone.hoverClass
       )}>
       {/* Icon — on narrow tabs, X overlay replaces icon on hover (Chrome-style) */}
-      <div className="relative flex h-[13px] w-[13px] shrink-0 items-center justify-center">
-        <TabIcon tab={tab} size={13} className={cn(showIconOverlayClose && 'group-hover:hidden')} />
+      <div className="relative flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+        <TabIcon tab={tab} size={14} className={cn(showIconOverlayClose && 'group-hover:hidden')} />
         {showIconOverlayClose && (
           <div
             role="button"
@@ -214,8 +216,11 @@ const NormalTabButton = ({
         )}
       </div>
       <span
-        className="min-w-0 flex-1 truncate text-left font-medium text-[11px] leading-none"
-        style={{ maskImage: 'linear-gradient(to right, black 80%, transparent 100%)' }}>
+        className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-left font-normal text-xs leading-none"
+        style={{
+          maskImage: 'linear-gradient(to right, black 80%, transparent 100%)',
+          WebkitMaskImage: 'linear-gradient(to right, black 80%, transparent 100%)'
+        }}>
         {tab.title}
       </span>
       {/* Right-side close button — only on wide tabs */}
@@ -367,6 +372,7 @@ const TabRightClickMenu = ({
 export const AppShellTabBar = ({
   tabs,
   activeTabId,
+  isFullscreen = false,
   setActiveTab,
   closeTab,
   reorderTabs,
@@ -489,12 +495,13 @@ export const AppShellTabBar = ({
           'relative flex h-11 w-full select-none items-center gap-1 [-webkit-app-region:drag]',
           isMacTransparentWindow ? 'bg-transparent' : 'bg-sidebar',
           rightPaddingClass,
-          isMac ? 'pl-[env(titlebar-area-x)]' : 'pl-3'
+          'pl-0'
         )}>
         {/* Tab buttons are no-drag; empty tabbar space remains available for moving the window. */}
         <div
           data-testid="app-shell-tab-strip"
-          className="flex flex-1 items-center gap-1 overflow-x-auto px-1 [&::-webkit-scrollbar]:hidden">
+          style={isMac && !isFullscreen ? { paddingLeft: MACOS_TAB_STRIP_TRAFFIC_LIGHT_RESERVE } : undefined}
+          className="flex flex-1 items-center gap-1 overflow-x-auto pr-1 [&::-webkit-scrollbar]:hidden">
           {/* Pinned tabs */}
           {pinnedTabs.length > 0 && (
             <div className="flex shrink-0 items-center gap-0 rounded-full bg-sidebar-accent/50 p-0 [-webkit-app-region:no-drag]">

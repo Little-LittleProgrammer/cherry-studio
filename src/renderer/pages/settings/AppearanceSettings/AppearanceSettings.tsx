@@ -30,10 +30,13 @@ import { useTheme } from '@renderer/hooks/useTheme'
 import { useTimer } from '@renderer/hooks/useTimer'
 import useUserTheme from '@renderer/hooks/useUserTheme'
 import i18n from '@renderer/i18n/resolver'
+import { ipcApi } from '@renderer/ipc'
+import { popup } from '@renderer/services/popup'
+import { toast } from '@renderer/services/toast'
 import { formatErrorMessage } from '@renderer/utils/error'
 import { isLinux, isMac } from '@renderer/utils/platform'
 import { cn } from '@renderer/utils/style'
-import type { ChatLayoutMode, LanguageVarious, MenuPresentationMode } from '@shared/data/preference/preferenceTypes'
+import type { LanguageVarious, MenuPresentationMode } from '@shared/data/preference/preferenceTypes'
 import { ThemeMode } from '@shared/data/preference/preferenceTypes'
 import { defaultLanguage } from '@shared/utils/languages'
 import { Minus, Monitor, Moon, Plus, Sun } from 'lucide-react'
@@ -82,38 +85,38 @@ const languagesOptions: { value: LanguageVarious; label: string; flag: string }[
   { value: 'vi-VN', label: 'Tiếng Việt', flag: '🇻🇳' }
 ]
 
-export function confirmMenuPresentationModeChange({
+export async function confirmMenuPresentationModeChange({
   currentMode,
   mode,
   setMenuPresentationMode,
   setTimeoutTimer,
   t
-}: MenuPresentationModeChangeOptions): void {
+}: MenuPresentationModeChangeOptions): Promise<void> {
   if (mode === currentMode) return
 
-  void window.modal.confirm({
+  const confirmed = await popup.confirm({
     title: t('settings.general.common.menu.presentation_mode.restart.title'),
     content: t('settings.general.common.menu.presentation_mode.restart.content'),
     okText: t('common.confirm'),
     cancelText: t('common.cancel'),
-    centered: true,
-    async onOk() {
-      try {
-        await setMenuPresentationMode(mode)
-      } catch (error) {
-        window.toast.error(formatErrorMessage(error))
-        throw error
-      }
-
-      setTimeoutTimer(
-        'handleMenuPresentationModeChange',
-        () => {
-          void window.api.application.relaunch()
-        },
-        500
-      )
-    }
+    centered: true
   })
+  if (!confirmed) return
+
+  try {
+    await setMenuPresentationMode(mode)
+  } catch (error) {
+    toast.error(formatErrorMessage(error))
+    throw error
+  }
+
+  setTimeoutTimer(
+    'handleMenuPresentationModeChange',
+    () => {
+      void window.api.application.relaunch()
+    },
+    500
+  )
 }
 
 const AppearanceSettings: FC = () => {
@@ -128,8 +131,6 @@ const AppearanceSettings: FC = () => {
   const [menuPresentationMode, setMenuPresentationMode] = usePreference('menu.presentation_mode')
   const [customCss, setCustomCss] = usePreference('ui.custom_css')
   const [fontSize] = usePreference('chat.message.font_size')
-  const [topicLayout, setTopicLayout] = usePreference('topic.layout')
-  const [sessionLayout, setSessionLayout] = usePreference('agent.layout')
   const [useSystemTitleBar, setUseSystemTitleBar] = usePreference('app.use_system_title_bar')
   const [codeExecution, setCodeExecution] = useMultiplePreferences({
     enabled: 'chat.code.execution.enabled',
@@ -190,7 +191,7 @@ const AppearanceSettings: FC = () => {
   useEffect(() => {
     const loadSystemFonts = async () => {
       try {
-        const fonts = await window.api.getSystemFonts()
+        const fonts = await ipcApi.request('system.get_fonts')
         setFontList(fonts)
       } catch (error) {
         logger.error('Failed to get system fonts', error as Error)
@@ -199,7 +200,7 @@ const AppearanceSettings: FC = () => {
 
     const updateCurrentZoom = async () => {
       try {
-        const factor = await window.api.handleZoomFactor(0)
+        const factor = await ipcApi.request('app.adjust_zoom', { delta: 0 })
         setCurrentZoom(factor)
       } catch (error) {
         logger.error('Failed to get current zoom factor', error as Error)
@@ -240,17 +241,9 @@ const AppearanceSettings: FC = () => {
     [t]
   )
 
-  const layoutOptions = useMemo(
-    () => [
-      { value: 'classic' as const, label: t('settings.messages.layout.classic') },
-      { value: 'modern' as const, label: t('settings.messages.layout.modern') }
-    ],
-    [t]
-  )
-
   const handleMenuPresentationModeChange = useCallback(
     (mode: MenuPresentationMode) => {
-      confirmMenuPresentationModeChange({
+      void confirmMenuPresentationModeChange({
         currentMode: menuPresentationMode,
         mode,
         setMenuPresentationMode,
@@ -261,34 +254,34 @@ const AppearanceSettings: FC = () => {
     [menuPresentationMode, setMenuPresentationMode, setTimeoutTimer, t]
   )
 
-  const handleUseSystemTitleBarChange = (checked: boolean) => {
-    void window.modal.confirm({
+  const handleUseSystemTitleBarChange = async (checked: boolean) => {
+    const confirmed = await popup.confirm({
       title: t('settings.use_system_title_bar.confirm.title'),
       content: t('settings.use_system_title_bar.confirm.content'),
       okText: t('common.confirm'),
       cancelText: t('common.cancel'),
-      centered: true,
-      async onOk() {
-        try {
-          await setUseSystemTitleBar(checked)
-        } catch (error) {
-          window.toast.error(formatErrorMessage(error))
-          throw error
-        }
-
-        setTimeoutTimer(
-          'handleUseSystemTitleBarChange',
-          () => {
-            void window.api.application.relaunch()
-          },
-          500
-        )
-      }
+      centered: true
     })
+    if (!confirmed) return
+
+    try {
+      await setUseSystemTitleBar(checked)
+    } catch (error) {
+      toast.error(formatErrorMessage(error))
+      throw error
+    }
+
+    setTimeoutTimer(
+      'handleUseSystemTitleBarChange',
+      () => {
+        void window.api.application.relaunch()
+      },
+      500
+    )
   }
 
   const handleZoomFactor = async (delta: number, reset: boolean = false) => {
-    const zoomFactor = await window.api.handleZoomFactor(delta, reset)
+    const zoomFactor = await ipcApi.request('app.adjust_zoom', { delta, reset })
     setCurrentZoom(zoomFactor)
   }
 
@@ -465,30 +458,6 @@ const AppearanceSettings: FC = () => {
       </SettingGroup>
 
       <SettingGroup theme={theme} className={appearanceSectionClassName}>
-        <SettingTitle>{t('settings.display.topic.title')}</SettingTitle>
-        <SettingDivider />
-        <SettingRow>
-          <SettingRowTitle>{t('settings.messages.layout.conversation')}</SettingRowTitle>
-          <SegmentedControl<ChatLayoutMode>
-            value={topicLayout}
-            onValueChange={setTopicLayout}
-            options={layoutOptions}
-            size="sm"
-          />
-        </SettingRow>
-        <SettingDivider />
-        <SettingRow>
-          <SettingRowTitle>{t('settings.messages.layout.work')}</SettingRowTitle>
-          <SegmentedControl<ChatLayoutMode>
-            value={sessionLayout}
-            onValueChange={setSessionLayout}
-            options={layoutOptions}
-            size="sm"
-          />
-        </SettingRow>
-      </SettingGroup>
-
-      <SettingGroup theme={theme} className={appearanceSectionClassName}>
         <SettingTitle style={{ justifyContent: 'flex-start', gap: 5 }}>
           {t('settings.display.font.title')} <Badge className="border-primary/20 bg-primary/10 text-primary">New</Badge>
         </SettingTitle>
@@ -590,7 +559,7 @@ const AppearanceSettings: FC = () => {
       <SettingGroup theme={theme} className={appearanceSectionClassName}>
         <SettingTitle>
           {t('settings.display.custom.css.label')}
-          <TitleExtra onClick={() => window.api.openWebsite('https://cherrycss.com/')}>
+          <TitleExtra onClick={() => ipcApi.request('system.shell.open_website', 'https://cherrycss.com/')}>
             {t('settings.display.custom.css.cherrycss')}
           </TitleExtra>
         </SettingTitle>

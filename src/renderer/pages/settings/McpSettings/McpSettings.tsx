@@ -35,7 +35,10 @@ import { useSharedCache } from '@renderer/data/hooks/useCache'
 import { useMcpRuntimeStatus } from '@renderer/hooks/useMcpRuntimeStatus'
 import { useMcpServer } from '@renderer/hooks/useMcpServer'
 import { useTheme } from '@renderer/hooks/useTheme'
+import { ipcApi } from '@renderer/ipc'
 import McpDescription from '@renderer/pages/settings/McpSettings/McpDescription'
+import { popup } from '@renderer/services/popup'
+import { toast } from '@renderer/services/toast'
 import type { McpTool } from '@renderer/types/tool'
 import { parseKeyValueString } from '@renderer/utils/env'
 import { formatMcpError } from '@renderer/utils/error'
@@ -256,7 +259,7 @@ const McpSettings: React.FC = () => {
     if (server?.isActive) {
       try {
         setLoadingServer(server.id)
-        await window.api.mcp.refreshTools(server.id)
+        await ipcApi.request('mcp.server.refresh_tools', { serverId: server.id })
       } catch (error) {
         logger.error('Failed to list MCP tools', error as Error)
       } finally {
@@ -269,7 +272,7 @@ const McpSettings: React.FC = () => {
     if (server?.isActive) {
       try {
         setLoadingServer(server.id)
-        const localPrompts = await window.api.mcp.listPrompts(server.id)
+        const localPrompts = await ipcApi.request('mcp.server.list_prompts', { serverId: server.id })
         setPrompts(localPrompts)
       } catch (error) {
         logger.error('Failed to list MCP prompts', error as Error)
@@ -284,7 +287,7 @@ const McpSettings: React.FC = () => {
     if (server?.isActive) {
       try {
         setLoadingServer(server.id)
-        const localResources = await window.api.mcp.listResources(server.id)
+        const localResources = await ipcApi.request('mcp.server.list_resources', { serverId: server.id })
         setResources(localResources)
       } catch (error) {
         logger.error('Failed to list MCP resources', error as Error)
@@ -298,7 +301,7 @@ const McpSettings: React.FC = () => {
   const fetchServerVersion = async () => {
     if (server?.isActive) {
       try {
-        const version = await window.api.mcp.getServerVersion(server.id)
+        const version = await ipcApi.request('mcp.server.get_version', { serverId: server.id })
         setServerVersion(version)
       } catch (error) {
         logger.error('Failed to get MCP server version', error as Error)
@@ -311,7 +314,7 @@ const McpSettings: React.FC = () => {
     if (!serverId) return
     const requestId = ++fetchServerLogsRequestRef.current
     try {
-      const history = await window.api.mcp.getServerLogs(serverId)
+      const history = await ipcApi.request('mcp.server.get_logs', { serverId })
       if (requestId === fetchServerLogsRequestRef.current && serverId === server?.id) {
         setLogs((prev) => mergeServerLogs(history, prev))
       }
@@ -321,7 +324,7 @@ const McpSettings: React.FC = () => {
   }
 
   useEffect(() => {
-    const unsubscribe = window.api.mcp.onServerLog((log) => {
+    const unsubscribe = ipcApi.on('mcp.server.log', (log) => {
       if (log.serverId && log.serverId !== server?.id) return
       setLogs((prev) => {
         const merged = [...prev, log]
@@ -416,11 +419,11 @@ const McpSettings: React.FC = () => {
       if (server.isActive) {
         try {
           await updateMcpServer({ body: { ...mcpServerDto, isActive: true } })
-          await window.api.mcp.restartServer(server.id)
-          window.toast.success(t('settings.mcp.updateSuccess'))
+          await ipcApi.request('mcp.server.restart', { serverId: server.id })
+          toast.success(t('settings.mcp.updateSuccess'))
           setIsFormChanged(false)
         } catch (error: any) {
-          window.modal.error({
+          void popup.error({
             title: t('settings.mcp.updateError'),
             content: error.message,
             centered: true
@@ -428,7 +431,7 @@ const McpSettings: React.FC = () => {
         }
       } else {
         await updateMcpServer({ body: { ...mcpServerDto, isActive: false } })
-        window.toast.success(t('settings.mcp.updateSuccess'))
+        toast.success(t('settings.mcp.updateSuccess'))
         setIsFormChanged(false)
       }
       setLoading(false)
@@ -485,20 +488,20 @@ const McpSettings: React.FC = () => {
   const onDeleteMcpServer = useCallback(
     async (serverToDelete: McpServer) => {
       try {
-        window.modal.confirm({
+        const confirmed = await popup.confirm({
           title: t('settings.mcp.deleteServer'),
           content: t('settings.mcp.deleteServerConfirm'),
           centered: true,
-          okButtonProps: { danger: true },
-          onOk: async () => {
-            await window.api.mcp.removeServer(serverToDelete.id)
-            await deleteMcpServer({})
-            window.toast.success(t('settings.mcp.deleteSuccess'))
-            void navigate({ to: '/settings/mcp' })
-          }
+          okButtonProps: { danger: true }
         })
+        if (!confirmed) return
+
+        await ipcApi.request('mcp.server.remove', { serverId: serverToDelete.id })
+        await deleteMcpServer({})
+        toast.success(t('settings.mcp.deleteSuccess'))
+        void navigate({ to: '/settings/mcp' })
       } catch (error: any) {
-        window.toast.error(`${t('settings.mcp.deleteError')}: ${error.message}`)
+        toast.error(`${t('settings.mcp.deleteError')}: ${error.message}`)
       }
     },
 
@@ -532,18 +535,18 @@ const McpSettings: React.FC = () => {
       if (active) {
         await updateMcpServer({ body: { isActive: true } })
         try {
-          await window.api.mcp.refreshTools(serverForUpdate.id)
+          await ipcApi.request('mcp.server.refresh_tools', { serverId: serverForUpdate.id })
 
-          const localPrompts = await window.api.mcp.listPrompts(serverForUpdate.id)
+          const localPrompts = await ipcApi.request('mcp.server.list_prompts', { serverId: serverForUpdate.id })
           setPrompts(localPrompts)
 
-          const localResources = await window.api.mcp.listResources(serverForUpdate.id)
+          const localResources = await ipcApi.request('mcp.server.list_resources', { serverId: serverForUpdate.id })
           setResources(localResources)
 
-          const version = await window.api.mcp.getServerVersion(serverForUpdate.id)
+          const version = await ipcApi.request('mcp.server.get_version', { serverId: serverForUpdate.id })
           setServerVersion(version)
         } catch (error: any) {
-          window.modal.error({
+          void popup.error({
             title: t('settings.mcp.startError'),
             content: formatMcpError(error as McpError),
             centered: true
@@ -551,11 +554,11 @@ const McpSettings: React.FC = () => {
         }
       } else {
         await updateMcpServer({ body: { isActive: false } })
-        await window.api.mcp.stopServer(serverForUpdate.id)
+        await ipcApi.request('mcp.server.stop', { serverId: serverForUpdate.id })
         setServerVersion(null)
       }
     } catch (error: any) {
-      window.modal.error({
+      void popup.error({
         title: active ? t('settings.mcp.startError') : t('settings.mcp.updateError'),
         content: formatMcpError(error as McpError),
         centered: true

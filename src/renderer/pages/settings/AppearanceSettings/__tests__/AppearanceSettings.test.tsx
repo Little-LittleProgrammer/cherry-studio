@@ -1,7 +1,9 @@
+import { popup } from '@renderer/services/popup'
+import { toast } from '@renderer/services/toast'
 import type { MenuPresentationMode } from '@shared/data/preference/preferenceTypes'
 import { MockUsePreferenceUtils } from '@test-mocks/renderer/usePreference'
 import { render, screen, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AppearanceSettings, { confirmMenuPresentationModeChange } from '../AppearanceSettings'
 
@@ -15,6 +17,10 @@ const i18nMock = vi.hoisted(() => ({
 vi.mock('@renderer/i18n/resolver', () => ({
   default: i18nMock
 }))
+
+const mocks = vi.hoisted(() => ({ request: vi.fn() }))
+vi.mock('@renderer/ipc', () => ({ ipcApi: { request: mocks.request } }))
+
 vi.mock('@cherrystudio/ui', async () => {
   const React = await import('react')
   const passthrough =
@@ -198,33 +204,17 @@ vi.mock('@renderer/utils/error', () => ({
 describe('AppearanceSettings menu presentation mode', () => {
   const setMenuPresentationMode = vi.fn<(mode: MenuPresentationMode) => Promise<void>>()
   const setTimeoutTimer = vi.fn<(key: string, callback: () => void, delay: number) => void>()
-  const confirm = vi.fn()
-  const relaunch = vi.fn()
-  const toastError = vi.fn()
-
-  let originalModal: any
-  let originalToast: any
-  let originalApi: any
 
   beforeEach(() => {
     vi.clearAllMocks()
     setMenuPresentationMode.mockResolvedValue(undefined)
-    originalModal = (window as any).modal
-    originalToast = (window as any).toast
-    originalApi = (window as any).api
-    ;(window as any).modal = { confirm }
-    ;(window as any).toast = { error: toastError }
-    ;(window as any).api = { application: { relaunch } }
-  })
-
-  afterEach(() => {
-    ;(window as any).modal = originalModal
-    ;(window as any).toast = originalToast
-    ;(window as any).api = originalApi
+    // Confirm resolves true so the confirmed branch runs; a test that needs the decline
+    // path overrides with mockResolvedValueOnce(false).
+    vi.mocked(popup.confirm).mockImplementation(async () => true)
   })
 
   it('does nothing when the selected mode is already active', () => {
-    confirmMenuPresentationModeChange({
+    void confirmMenuPresentationModeChange({
       currentMode: 'cherry',
       mode: 'cherry',
       setMenuPresentationMode,
@@ -232,11 +222,11 @@ describe('AppearanceSettings menu presentation mode', () => {
       t
     })
 
-    expect(confirm).not.toHaveBeenCalled()
+    expect(popup.confirm).not.toHaveBeenCalled()
   })
 
   it('saves the selected mode and schedules relaunch after confirmation', async () => {
-    confirmMenuPresentationModeChange({
+    await confirmMenuPresentationModeChange({
       currentMode: 'cherry',
       mode: 'native',
       setMenuPresentationMode,
@@ -244,7 +234,7 @@ describe('AppearanceSettings menu presentation mode', () => {
       t
     })
 
-    expect(confirm).toHaveBeenCalledWith(
+    expect(popup.confirm).toHaveBeenCalledWith(
       expect.objectContaining({
         title: 'settings.general.common.menu.presentation_mode.restart.title',
         content: 'settings.general.common.menu.presentation_mode.restart.content',
@@ -254,54 +244,44 @@ describe('AppearanceSettings menu presentation mode', () => {
       })
     )
 
-    const options = confirm.mock.calls[0][0]
-    await options.onOk()
-
     expect(setMenuPresentationMode).toHaveBeenCalledWith('native')
     expect(setTimeoutTimer).toHaveBeenCalledWith('handleMenuPresentationModeChange', expect.any(Function), 500)
 
     setTimeoutTimer.mock.calls[0][1]()
-    expect(relaunch).toHaveBeenCalledTimes(1)
+    expect(window.api.application.relaunch).toHaveBeenCalled()
   })
 
   it('surfaces save failures without scheduling relaunch', async () => {
     const error = new Error('save failed')
     setMenuPresentationMode.mockRejectedValue(error)
 
-    confirmMenuPresentationModeChange({
-      currentMode: 'cherry',
-      mode: 'native',
-      setMenuPresentationMode,
-      setTimeoutTimer,
-      t
-    })
+    await expect(
+      confirmMenuPresentationModeChange({
+        currentMode: 'cherry',
+        mode: 'native',
+        setMenuPresentationMode,
+        setTimeoutTimer,
+        t
+      })
+    ).rejects.toThrow('save failed')
 
-    const options = confirm.mock.calls[0][0]
-    await expect(options.onOk()).rejects.toThrow('save failed')
-
-    expect(toastError).toHaveBeenCalledWith('save failed')
+    expect(toast.error).toHaveBeenCalledWith('save failed')
     expect(setTimeoutTimer).not.toHaveBeenCalled()
-    expect(relaunch).not.toHaveBeenCalled()
+    expect(window.api.application.relaunch).not.toHaveBeenCalled()
   })
 })
 
 describe('AppearanceSettings language selector', () => {
-  let originalApi: any
-
   beforeEach(() => {
-    originalApi = (window as any).api
     MockUsePreferenceUtils.resetMocks()
     i18nMock.language = 'zh-CN'
     i18nMock.resolvedLanguage = 'zh-CN'
-    ;(window as any).api = {
-      getSystemFonts: vi.fn().mockResolvedValue([]),
-      handleZoomFactor: vi.fn().mockResolvedValue(1),
-      openWebsite: vi.fn()
-    }
-  })
-
-  afterEach(() => {
-    ;(window as any).api = originalApi
+    mocks.request.mockReset()
+    mocks.request.mockImplementation((route: string) => {
+      if (route === 'system.get_fonts') return Promise.resolve([])
+      if (route === 'app.adjust_zoom') return Promise.resolve(1)
+      return Promise.resolve(undefined)
+    })
   })
 
   it('shows the resolved i18n language when no app language preference is saved', async () => {
@@ -310,11 +290,23 @@ describe('AppearanceSettings language selector', () => {
     render(<AppearanceSettings />)
 
     await waitFor(() => {
-      expect(window.api.getSystemFonts).toHaveBeenCalled()
-      expect(window.api.handleZoomFactor).toHaveBeenCalled()
+      expect(mocks.request).toHaveBeenCalledWith('system.get_fonts')
+      expect(mocks.request).toHaveBeenCalledWith('app.adjust_zoom', { delta: 0 })
     })
 
     expect(screen.getByRole('combobox', { name: /中文/ })).toBeInTheDocument()
     expect(screen.queryByRole('combobox', { name: /English/ })).not.toBeInTheDocument()
+  })
+
+  it('does not render manual chat layout switches', async () => {
+    render(<AppearanceSettings />)
+
+    await waitFor(() => {
+      expect(mocks.request).toHaveBeenCalledWith('system.get_fonts')
+      expect(mocks.request).toHaveBeenCalledWith('app.adjust_zoom', { delta: 0 })
+    })
+
+    expect(screen.queryByText('settings.messages.layout.conversation')).not.toBeInTheDocument()
+    expect(screen.queryByText('settings.messages.layout.work')).not.toBeInTheDocument()
   })
 })

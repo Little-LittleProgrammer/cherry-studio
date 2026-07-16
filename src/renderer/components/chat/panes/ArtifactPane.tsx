@@ -13,6 +13,7 @@ import { FinderIcon } from '@renderer/components/icons/SvgIcon'
 import { useExternalApps } from '@renderer/hooks/useExternalApps'
 import { type FileSizeState, useFileSize } from '@renderer/hooks/useFileSize'
 import { type IsTextState, useIsTextFile } from '@renderer/hooks/useIsTextFile'
+import { toast } from '@renderer/services/toast'
 import { getLanguageByFilePath } from '@renderer/utils/codeLanguage'
 import { buildEditorUrl } from '@renderer/utils/editor'
 import { formatErrorMessageWithPrefix } from '@renderer/utils/error'
@@ -67,7 +68,6 @@ interface ArtifactFilePreviewProps {
   filePath?: string | null
   isText: IsTextState
   fileSize: FileSizeState
-  officeActions?: ReactNode
   pdfLayoutPending?: boolean
   pdfLayoutRefreshKey?: number
   contentRefreshKey?: number
@@ -149,7 +149,6 @@ export function ArtifactFilePreview({
   filePath,
   isText,
   fileSize,
-  officeActions,
   pdfLayoutPending = false,
   pdfLayoutRefreshKey = 0,
   contentRefreshKey = 0
@@ -366,7 +365,6 @@ export function ArtifactFilePreview({
         sourceSize={fileSize.status === 'ok' ? fileSize.size : undefined}
         className="min-h-0"
         refreshKey={contentRefreshKey}
-        actions={officeActions}
       />
     )
   }
@@ -557,7 +555,7 @@ export function ArtifactPaneView({
       try {
         await window.api.file.openPath(path)
       } catch (error) {
-        window.toast.error(formatErrorMessageWithPrefix(error, t('files.error.open_path', { path })))
+        toast.error(formatErrorMessageWithPrefix(error, t('files.error.open_path', { path })))
       }
     },
     [t]
@@ -568,7 +566,7 @@ export function ArtifactPaneView({
       try {
         await window.api.file.showInFolder(path)
       } catch (error) {
-        window.toast.error(formatErrorMessageWithPrefix(error, t('files.error.open_path', { path })))
+        toast.error(formatErrorMessageWithPrefix(error, t('files.error.open_path', { path })))
       }
     },
     [t]
@@ -625,19 +623,23 @@ export function ArtifactPaneView({
     [availableEditors, fileManagerName, openPath, showInFolder, t, workspacePath]
   )
 
+  const refreshButton = (
+    <Tooltip content={t('agent.preview_pane.refresh')} delay={800}>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className="text-muted-foreground hover:bg-accent hover:text-foreground"
+        aria-label={t('agent.preview_pane.refresh')}
+        onClick={handleRefresh}>
+        <RotateCw size={16} />
+      </Button>
+    </Tooltip>
+  )
+
   const searchToolbar = (
     <div className="flex shrink-0 items-center gap-1">
-      <Tooltip content={t('agent.preview_pane.refresh')} delay={800}>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          className="text-muted-foreground hover:bg-accent hover:text-foreground"
-          aria-label={t('agent.preview_pane.refresh')}
-          onClick={handleRefresh}>
-          <RotateCw size={16} />
-        </Button>
-      </Tooltip>
+      {refreshButton}
       {workspacePath && <OpenExternalAppButton workdir={workspacePath} />}
     </div>
   )
@@ -656,29 +658,34 @@ export function ArtifactPaneView({
         data-testid="artifact-file-preview-overlay"
         tabIndex={-1}
         onKeyDown={handleOverlayKeyDown}
-        className={cn(
-          'absolute inset-0 z-20 flex min-h-0 flex-col bg-card text-card-foreground',
-          isSelectedHtmlPreview || isSelectedPdfPreview || isSelectedOfficePreview || isSelectedImagePreview
-            ? 'overflow-hidden'
-            : 'overflow-auto'
-        )}>
-        <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-border-subtle border-b px-3">
+        className="absolute inset-0 z-20 flex min-h-0 flex-col overflow-hidden bg-card text-card-foreground">
+        <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-border-subtle border-b pr-2 pl-3">
           <div className="min-w-0 truncate font-medium text-foreground text-sm">
             {getPreviewFileTitle(overlaySelection.filePath)}
           </div>
-          <Tooltip content={t('agent.preview_pane.close')} delay={800}>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="text-muted-foreground hover:bg-accent hover:text-foreground"
-              aria-label={t('agent.preview_pane.close')}
-              onClick={handleClosePreview}>
-              <X size={16} />
-            </Button>
-          </Tooltip>
+          <div className="flex shrink-0 items-center gap-1">
+            <OpenExternalAppButton workdir={overlaySelection.workspacePath} filePath={overlaySelection.filePath} />
+            {refreshButton}
+            <Tooltip content={t('agent.preview_pane.close')} delay={800}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground hover:bg-accent hover:text-foreground"
+                aria-label={t('agent.preview_pane.close')}
+                onClick={handleClosePreview}>
+                <X size={16} />
+              </Button>
+            </Tooltip>
+          </div>
         </div>
-        <div className="min-h-0 flex-1">
+        <div
+          className={cn(
+            'min-h-0 flex-1',
+            isSelectedHtmlPreview || isSelectedPdfPreview || isSelectedOfficePreview || isSelectedImagePreview
+              ? 'overflow-hidden'
+              : 'overflow-auto'
+          )}>
           <ArtifactFilePreview
             workspacePath={overlaySelection.workspacePath}
             filePath={overlaySelection.filePath}
@@ -687,11 +694,6 @@ export function ArtifactPaneView({
             pdfLayoutPending={pdfLayoutPending}
             pdfLayoutRefreshKey={pdfLayoutRefreshKey}
             contentRefreshKey={contentRefreshToken}
-            officeActions={
-              isOfficeDocumentSelection ? (
-                <OpenExternalAppButton workdir={overlaySelection.workspacePath} filePath={overlaySelection.filePath} />
-              ) : undefined
-            }
           />
         </div>
       </div>
@@ -763,7 +765,7 @@ export function ArtifactPaneView({
     <div
       ref={artifactPaneRef}
       className={cn(
-        'flex h-full min-h-0 flex-col overflow-hidden bg-card text-card-foreground',
+        'flex h-full min-h-0 flex-col overflow-hidden text-card-foreground',
         maximized && 'rounded-lg border border-border-subtle shadow-sm'
       )}>
       <div className="relative min-h-0 flex-1 overflow-hidden">

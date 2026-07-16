@@ -1,5 +1,6 @@
 import type * as CherryStudioUi from '@cherrystudio/ui'
 import type * as ModelSelectorModule from '@renderer/components/ModelSelector'
+import type * as UseModelModule from '@renderer/hooks/useModel'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import type * as ReactI18next from 'react-i18next'
@@ -70,6 +71,15 @@ vi.mock('@renderer/hooks/usePins', () => ({
   usePins: usePinsMock
 }))
 
+vi.mock('@renderer/hooks/useModel', async (importOriginal) => ({
+  ...(await importOriginal<typeof UseModelModule>()),
+  useDefaultModel: () => ({ defaultModel: undefined })
+}))
+
+vi.mock('@renderer/hooks/tab', () => ({
+  useTabs: () => ({ openTab: vi.fn() })
+}))
+
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof ReactI18next>()
   return {
@@ -131,6 +141,7 @@ vi.mock('react-i18next', async (importOriginal) => {
 })
 
 import { DEFAULT_SELECTOR_CONTENT_HEIGHT } from '@renderer/components/SelectorShell'
+import { toast } from '@renderer/services/toast'
 
 import { AssistantSelector } from '../AssistantSelector'
 
@@ -221,8 +232,6 @@ const ASSISTANTS_RESPONSE = {
   page: 1
 } as const
 
-const toastErrorMock = vi.fn()
-
 beforeAll(() => {
   globalThis.ResizeObserver = class {
     observe() {}
@@ -239,7 +248,6 @@ beforeAll(() => {
     HTMLElement.prototype.setPointerCapture = () => {}
   }
   HTMLElement.prototype.scrollIntoView = () => {}
-  window.toast = { error: toastErrorMock } as unknown as typeof window.toast
 })
 
 beforeEach(() => {
@@ -450,7 +458,6 @@ describe('AssistantSelector', () => {
     expect(await screen.findByRole('heading', { name: 'Edit Assistant' }, { timeout: 5000 })).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Renamed Assistant' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(updateAssistantMock).toHaveBeenCalled())
     await waitFor(() => expect(refetchAssistantsMock).toHaveBeenCalledTimes(1))
@@ -472,7 +479,7 @@ describe('AssistantSelector', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Edit assistant' })[0])
     expect(await screen.findByRole('heading', { name: 'Edit Assistant' }, { timeout: 5000 })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
 
     expect(onDialogCloseAutoFocus).toHaveBeenCalledTimes(1)
   })
@@ -492,7 +499,7 @@ describe('AssistantSelector', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Edit assistant' })[0])
     expect(await screen.findByRole('heading', { name: 'Edit Assistant' }, { timeout: 5000 })).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Saved Assistant' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
 
     await waitFor(() => expect(updateAssistantMock).toHaveBeenCalled())
     await waitFor(() => expect(refetchAssistantsMock).toHaveBeenCalledTimes(1))
@@ -512,7 +519,7 @@ describe('AssistantSelector', () => {
 
     await waitFor(() => expect(refetchAssistantsMock).toHaveBeenCalledTimes(1))
 
-    expect(toastErrorMock).toHaveBeenCalledWith('Created, but refresh failed')
+    expect(toast.error).toHaveBeenCalledWith('Created, but refresh failed')
     await waitFor(() => expect(screen.getByPlaceholderText('Search assistants')).toBeInTheDocument())
   })
 })

@@ -7,8 +7,10 @@ import type { SelectorShellMountStrategy, SelectorShellProps } from '@renderer/c
 import { useMutation, useQuery } from '@renderer/data/hooks/useDataApi'
 import { useAgentModelFilter } from '@renderer/hooks/agent/useAgentModelFilter'
 import { usePins } from '@renderer/hooks/usePins'
+import { toast } from '@renderer/services/toast'
 import type { AgentDetail } from '@renderer/types/resourceCatalog'
-import { getAgentAvatarFromConfiguration } from '@renderer/utils/agent'
+import { getAgentAvatarFromConfiguration, getAgentDescriptionForDisplay } from '@renderer/utils/agent'
+import { buildCreateAgentDto } from '@renderer/utils/resourceCatalog'
 import { lazy, type ReactElement, Suspense, useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -25,6 +27,7 @@ export type AgentSelectorItem = ResourceSelectorShellItem
 
 type SharedProps = {
   trigger: ReactElement
+  additionalItems?: readonly AgentSelectorItem[]
   open?: boolean
   onOpenChange?: (open: boolean) => void
   onDialogCloseAutoFocus?: () => void
@@ -52,6 +55,7 @@ export type AgentSelectorProps = AgentSelectorSingleIdProps | AgentSelectorSingl
 export function AgentSelector(props: AgentSelectorProps) {
   const {
     trigger,
+    additionalItems,
     open,
     onOpenChange,
     onDialogCloseAutoFocus,
@@ -93,14 +97,16 @@ export function AgentSelector(props: AgentSelectorProps) {
   const isPinActionDisabled = isPinnedLoading || isPinsRefreshing || isPinsMutating
 
   const items: AgentSelectorItem[] = useMemo(
-    () =>
-      (data?.items ?? []).map((agent) => ({
+    () => [
+      ...(data?.items ?? []).map((agent) => ({
         id: agent.id,
         name: agent.name,
-        description: agent.description,
+        description: getAgentDescriptionForDisplay(agent, t),
         emoji: getAgentAvatarFromConfiguration(agent.configuration)
       })),
-    [data]
+      ...(additionalItems ?? [])
+    ],
+    [additionalItems, data, t]
   )
 
   const handleTogglePin = useCallback(
@@ -110,7 +116,7 @@ export function AgentSelector(props: AgentSelectorProps) {
         await togglePin(id)
       } catch (error) {
         logger.error('Failed to toggle agent pin', error as Error, { id })
-        window.toast?.error(t('common.error'))
+        toast.error(t('common.error'))
       }
     },
     [isPinActionDisabled, togglePin, t]
@@ -153,21 +159,7 @@ export function AgentSelector(props: AgentSelectorProps) {
       let created: AgentDetail
       try {
         created = await createAgent({
-          body: {
-            type: 'claude-code',
-            name: values.name,
-            model: values.modelId,
-            planModel: values.modelId,
-            smallModel: values.modelId,
-            description: values.description,
-            instructions: values.prompt,
-            skillIds: values.skillIds,
-            configuration: {
-              avatar: values.avatar,
-              permission_mode: 'bypassPermissions',
-              soul_enabled: true
-            }
-          }
+          body: buildCreateAgentDto(values)
         })
       } catch (error) {
         logger.error('Failed to create agent from selector', error as Error)
@@ -180,14 +172,14 @@ export function AgentSelector(props: AgentSelectorProps) {
         await refetch()
       } catch (error) {
         logger.warn('Failed to refresh agents after selector create', { error })
-        window.toast?.error(t('selector.create_dialog.refresh_failed'))
+        toast.error(t('selector.create_dialog.refresh_failed'))
       }
       if (autoSelectOnCreate) {
         if (props.selectionType === 'item') {
           props.onChange({
             id: created.id,
             name: created.name,
-            description: created.description,
+            description: getAgentDescriptionForDisplay(created, t),
             emoji: getAgentAvatarFromConfiguration(created.configuration)
           })
         } else {
@@ -208,7 +200,7 @@ export function AgentSelector(props: AgentSelectorProps) {
       await refetch()
     } catch (error) {
       logger.warn('Failed to refresh agents after selector edit', { error })
-      window.toast?.error(t('selector.edit_dialog.refresh_failed'))
+      toast.error(t('selector.edit_dialog.refresh_failed'))
     }
   }, [refetch, t])
 
